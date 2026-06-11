@@ -6,10 +6,13 @@ import logging
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from typing import Any, Dict
 
 # Import stage 1 processing and labeling routines without duplicating logic
-from stage1_preprocessing import load_data, preprocess_dataframe, save_processed_data
+from src.stage1_preprocessing import load_data, preprocess_dataframe, save_processed_data
 from src.pseudo_labels import generate_pseudo_labels
+from src.stage2_preprocessing import prepare_stage2_data
+from src.train_model import train
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,96 @@ def run_stage1(
         logger.exception("Pipeline processing failure during Stage 1: %s", error)
         raise
 
+def run_stage2(
+    dataset_path: str | Path | None = None,
+    metrics_output_path: str | Path | None = None,
+    random_seed: int = 42
+) -> Dict[str, Any]:
+    """
+    Coordinates data loading, multi-signal tabular pre-formatting, and model training steps.
+
+    Args:
+        dataset_path (str | Path | None): Path targeting Stage 1 labeled file.
+        metrics_output_path (str | Path | None): Local path target for JSON checkpointing.
+        random_seed (int): Reproducibility state variable passed down backend modules.
+
+    Returns:
+        Dict[str, Any]: Matrix containing evaluation scores parsed out of the training suite.
+    """
+    logger.info("Initializing Support Integrity Auditor (SIA) Stage 2 Framework Execution...")
+
+    # Establish localized target workspace layouts
+    project_root = Path(__file__).resolve().parent
+    if dataset_path is None:
+        dataset_path = project_root / "data" / "processed" / "pseudo_labeled_tickets.csv"
+    if metrics_output_path is None:
+        metrics_output_path = project_root / "outputs" / "metrics.json"
+
+    dataset_path = Path(dataset_path)
+    metrics_output_path = Path(metrics_output_path)
+
+    # Step 1: Load pseudo-labeled source data frame matrix
+    if not dataset_path.exists():
+        logger.error(f"Execution halted. Stage 1 source data array missing at: {dataset_path}")
+        raise FileNotFoundError(f"Required file input missing: {dataset_path}")
+
+    logger.info(f"Step 1/4: Ingesting dataset files from targeted location: {dataset_path}")
+    raw_df = pd.read_csv(dataset_path)
+
+    # Step 2: Offload text processing, mapping, and tokenization to stage2_preprocessing
+    logger.info("Step 2/4: Transferring records data matrix to feature processing framework...")
+    train_dataset, val_dataset, test_dataset, preprocessing_artifacts = prepare_stage2_data(
+        df=raw_df, 
+        seed=random_seed
+    )
+
+    # Step 3: Extract and print statistical insights about data splits and class profiles
+    logger.info("Step 3/4: Compiling descriptive metrics on feature subsets...")
+    
+    # Safely search across flexible variations of targets in case column names change downstream
+    target_col = "Mismatch_Label" if "Mismatch_Label" in raw_df.columns else "Mismatch_Label"
+    if target_col in raw_df.columns:
+        distribution = raw_df[target_col].value_counts().to_dict()
+        dist_str = f"Consistent (0): {distribution.get(0, 0)} | Mismatch Anomaly (1): {distribution.get(1, 0)}"
+    else:
+        dist_str = "Label tracking dimension metrics unavailable on primary dataframe."
+
+    print("\n" + "="*60)
+    print("       SUPPORT INTEGRITY AUDITOR DATASET METRICS STATUS")
+    print("="*60)
+    print(f" Training Sample Subsets Block Matrix : {len(train_dataset):,}")
+    print(f" Validation Optimization Line Space   : {len(val_dataset):,}")
+    print(f" Test Evaluation Boundary Array Size : {len(test_dataset):,}")
+    print(f" Global Baseline Class Distribution   : {dist_str}")
+    print("="*60 + "\n")
+
+    # Step 4: Transfer finalized datasets to train_model suite for model tuning
+    logger.info("Step 4/4: Passing PyTorch dataset references to the DeBERTa training routine...")
+    trained_model, performance_metrics = train(
+        train_data=train_dataset,
+        val_data=val_dataset,
+        test_data=test_dataset,
+        artifacts=preprocessing_artifacts,
+        seed=random_seed
+    )
+
+    # Save metrics block to structured JSON format
+    metrics_output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(metrics_output_path, "w", encoding="utf-8") as metrics_file:
+        json.dump(performance_metrics, metrics_file, indent=4, ensure_ascii=False)
+    
+    logger.info(f"Evaluation metrics snapshot successfully exported to file: {metrics_output_path}")
+
+    # Display final execution summary in formatted view layout
+    print("\n" + "="*60)
+    print("          STAGE 2 DEBERTA MODEL VALIDATION METRICS")
+    print("="*60)
+    for key, score in performance_metrics.items():
+        print(f" • {key.title().ljust(15)} : {float(score) * 100:.2f}%")
+    print("="*60 + "\n")
+
+    logger.info("SIA Orchestration Layer pipeline run executed cleanly without runtime exceptions.")
+    return performance_metrics
 
 def main() -> None:
     """Main entry point configuration parsing execution options."""
