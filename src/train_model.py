@@ -32,12 +32,15 @@ from transformers import (
 from typing import Iterator
 import functools
 
-# Ensure script can locate stage2_preprocessing.py in the project structure
-sys.path.append(str(Path(__file__).resolve().parent))
-try:
-    from stage2_preprocessing import prepare_stage2_data, SIADataset
-except ImportError:
-    from src.stage2_preprocessing import prepare_stage2_data, SIADataset
+import sys
+from pathlib import Path
+
+# Add parent directory to path for relative imports
+_parent_dir = str(Path(__file__).resolve().parent)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+from stage2_preprocessing import prepare_stage2_data, SIADataset
 
 # Logging configuration
 logging.basicConfig(

@@ -21,15 +21,19 @@ import pandas as pd
 import seaborn as sns
 import streamlit as st
 
-# Ensure core repository files are importable
-sys.path.append(str(Path(__file__).resolve().parent))
+import sys
+from pathlib import Path
 
-try:
-    from predict import load_model, predict_ticket, predict_batch
-    from src.dossier_generator import build_dossier, determine_mismatch_type
-except ImportError:
-    from predict import load_model, predict_ticket, predict_batch
-    from dossier_generator import build_dossier, determine_mismatch_type
+# Robust path setup
+_app_dir = Path(__file__).resolve().parent
+if str(_app_dir) not in sys.path:
+    sys.path.insert(0, str(_app_dir))
+_src_dir = _app_dir / "src"
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
+from predict import load_model, predict_ticket, predict_batch
+from dossier_generator import build_dossier, determine_mismatch_type
 
 from src.dossier_generator import PRIORITY_TO_SEVERITY_MAP
 

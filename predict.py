@@ -20,7 +20,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModel, AutoTokenizer
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 # Setup structured logging configuration
 logging.basicConfig(

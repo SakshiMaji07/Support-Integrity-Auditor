@@ -8,6 +8,14 @@ import numpy as np
 import pandas as pd
 from typing import Any, Dict
 
+import sys
+from pathlib import Path
+
+# Ensure src is in path
+SRC_PATH = Path(__file__).resolve().parent / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+    
 # Import stage 1 processing and labeling routines without duplicating logic
 from src.stage1_preprocessing import load_data, preprocess_dataframe, save_processed_data
 from src.pseudo_labels import generate_pseudo_labels
@@ -15,7 +23,6 @@ from src.stage2_preprocessing import prepare_stage2_data
 from src.train_model import train
 
 logger = logging.getLogger(__name__)
-
 
 def run_stage1(
     raw_data_path: str | Path | None = None,
