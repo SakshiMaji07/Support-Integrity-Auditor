@@ -1,0 +1,47 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Model Files
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.ckpt
+
+# Dataset Files
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.json
+
+# Generated Outputs
+outputs/
+reports/
+
+# Logs
+*.log
+
+# Environment Variables
+.env
+
+# HuggingFace Cache
+.cache/
+huggingface/
+
+# Streamlit Secrets
+.streamlit/secrets.toml
