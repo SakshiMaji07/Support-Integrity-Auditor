@@ -4,7 +4,7 @@ Pseudo-label generation pipeline for Support Integrity Auditor.
 Generates inferred ticket severity without using the ticket priority column by combining:
 1. LLM severity signal (using phi-3)
 2. Resolution-time severity signal
-3. Cluster severity signal (using sentence transformers)
+3. Cluster severity signal (using sentence transformers + semantic keyword profiles)
 """
 
 from __future__ import annotations
@@ -127,7 +127,6 @@ def _load_llm_pipeline() -> None:
     else:
         device = None
 
-    # Essential pad token configurations for proper pipeline handling
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         model.config.pad_token_id = model.config.eos_token_id
@@ -137,7 +136,7 @@ def _load_llm_pipeline() -> None:
         model=model, 
         tokenizer=tokenizer, 
         device=device,
-        batch_size=32  # High efficiency throughput for batched datasets
+        batch_size=32
     )
 
 
@@ -212,7 +211,6 @@ def get_llm_severity_batch(texts: pd.Series) -> list[float]:
     scores = []
     prompts = [SEVERITY_PROMPT.format(ticket=str(t)[:2000]) if pd.notna(t) else "" for t in texts]
     
-    # Process using python pipeline generator context structures
     try:
         results = _phi3_pipe(
             prompts,
@@ -228,7 +226,6 @@ def get_llm_severity_batch(texts: pd.Series) -> list[float]:
                 continue
                 
             generated = result[0]["generated_text"].upper()
-            # Parse target strings out of generated windows cleanly
             assigned = False
             for val, label in SEVERITY_LEVELS.items():
                 if label in generated:
@@ -267,11 +264,47 @@ def generate_embeddings(texts: pd.Series) -> np.ndarray:
         return vectorizer.fit_transform(texts.astype(str)).toarray()
 
 
+def generate_cluster_profiles(
+    texts: pd.Series,
+    cluster_labels: np.ndarray,
+    n_clusters: int = 5,
+    top_n: int = 5,  # Increased default slightly for better semantic analysis mapping
+) -> dict[int, str]:
+    """Generate human-readable profile for each cluster using TF-IDF."""
+    profiles = {}
+    try:
+        for cluster_id in range(n_clusters):
+            cluster_mask = (cluster_labels == cluster_id)
+            cluster_texts = texts[cluster_mask].astype(str).tolist()
+            
+            if not cluster_texts:
+                profiles[cluster_id] = ""
+                continue
+            
+            vectorizer = TfidfVectorizer(max_features=100, stop_words='english')
+            try:
+                tfidf_matrix = vectorizer.fit_transform(cluster_texts)
+                feature_names = vectorizer.get_feature_names_out()
+                avg_tfidf = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
+                top_indices = avg_tfidf.argsort()[-top_n:][::-1]
+                top_terms = [feature_names[i] for i in top_indices if avg_tfidf[i] > 0]
+                profiles[cluster_id] = ",".join(top_terms) if top_terms else ""
+            except ValueError:
+                profiles[cluster_id] = ""
+    except Exception as e:
+        logger.warning("Error generating cluster profiles: %s", e)
+        for cluster_id in range(n_clusters):
+            profiles[cluster_id] = ""
+    
+    return profiles
+
+
 def perform_clustering(
     embeddings: np.ndarray,
+    texts: pd.Series,
     n_clusters: int = 5,
 ) -> tuple[np.ndarray, dict[int, float]]:
-    """Perform K-means clustering on embeddings."""
+    """Perform K-means clustering and calculate cluster severities based on cluster semantics."""
     logger.info("Performing K-means clustering with %d clusters...", n_clusters)
     
     scaler = StandardScaler()
@@ -282,11 +315,36 @@ def perform_clustering(
     
     logger.info("Clustering complete. Cluster distribution: %s", np.bincount(cluster_labels))
     
+    # Generate profiles context explicitly to deduce semantics
+    cluster_profiles = generate_cluster_profiles(texts, cluster_labels, n_clusters=n_clusters)
+    
+    # Map high/low signal keywords to score targets
+    semantic_weights = {
+        "outage": 1.0, "down": 1.0, "unavailable": 1.0, "breach": 1.0, "corruption": 1.0, "critical": 1.0, "emergency": 1.0, "crash": 1.0,
+        "broken": 0.75, "failed": 0.75, "error": 0.75, "failure": 0.75, "impact": 0.75, "major": 0.75,
+        "disruption": 0.50, "workaround": 0.50, "slow": 0.50, "performance": 0.50, "limited": 0.50, "partial": 0.50,
+        "question": 0.25, "request": 0.25, "cosmetic": 0.25, "ui": 0.25, "documentation": 0.25
+    }
+    
     cluster_severity_map = {}
     for cluster_id in range(n_clusters):
-        severity_score = 0.2 + (cluster_id / n_clusters) * 0.75
-        cluster_severity_map[cluster_id] = severity_score
-    
+        profile_text = cluster_profiles.get(cluster_id, "").lower()
+        matched_scores = []
+        
+        for word, weight in semantic_weights.items():
+            if word in profile_text:
+                matched_scores.append(weight)
+                
+        # If keywords match semantic targets, calculate the average, else fall back to a safe baseline median
+        if matched_scores:
+            cluster_severity_map[cluster_id] = float(np.mean(matched_scores))
+        else:
+            # Fallback baseline when cluster contains neutral terminology
+            cluster_severity_map[cluster_id] = 0.50
+            
+        logger.info("Cluster %d Semantics: [%s] -> Assigned Severity Score: %.2f", 
+                    cluster_id, cluster_profiles.get(cluster_id, "None"), cluster_severity_map[cluster_id])
+        
     return cluster_labels, cluster_severity_map
 
 
@@ -351,41 +409,6 @@ def extract_trigger_keywords(text: str) -> str:
     return "|".join(unique_matched) if unique_matched else ""
 
 
-def generate_cluster_profiles(
-    texts: pd.Series,
-    cluster_labels: np.ndarray,
-    n_clusters: int = 5,
-    top_n: int = 3,
-) -> dict[int, str]:
-    """Generate human-readable profile for each cluster using TF-IDF."""
-    profiles = {}
-    try:
-        for cluster_id in range(n_clusters):
-            cluster_mask = (cluster_labels == cluster_id)
-            cluster_texts = texts[cluster_mask].astype(str).tolist()
-            
-            if not cluster_texts:
-                profiles[cluster_id] = ""
-                continue
-            
-            vectorizer = TfidfVectorizer(max_features=100, stop_words='english')
-            try:
-                tfidf_matrix = vectorizer.fit_transform(cluster_texts)
-                feature_names = vectorizer.get_feature_names_out()
-                avg_tfidf = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
-                top_indices = avg_tfidf.argsort()[-top_n:][::-1]
-                top_terms = [feature_names[i] for i in top_indices if avg_tfidf[i] > 0]
-                profiles[cluster_id] = ",".join(top_terms) if top_terms else ""
-            except ValueError:
-                profiles[cluster_id] = ""
-    except Exception as e:
-        logger.warning("Error generating cluster profiles: %s", e)
-        for cluster_id in range(n_clusters):
-            profiles[cluster_id] = ""
-    
-    return profiles
-
-
 def generate_evidence_summary(
     ticket_id: str,
     trigger_keywords: str,
@@ -442,7 +465,7 @@ def generate_and_save_evidence(
                       np.where(res_times_series <= p50, "Resolution time is consistent with typical low-to-medium priority tickets.",
                       np.where(res_times_series <= p75, "Resolution time exceeds the median but remains within normal bounds.",
                       np.where(res_times_series <= p90, "Resolution time is notably extended, suggesting complex issues or high priority.",
-                                                        "Resolution time is substantially extended, indicating prolonged operational impact.")))))
+                                                               "Resolution time is substantially extended, indicating prolonged operational impact.")))))
 
     evidence_data = {
         "Ticket_ID": df["Ticket_ID"].tolist(),
@@ -482,8 +505,10 @@ def generate_pseudo_labels(
     
     logger.info("Generating embeddings...")
     embeddings = generate_embeddings(df["combined_text"])
-    cluster_labels, cluster_severity_map = perform_clustering(embeddings)
     
+    # CHANGED: Passed df["combined_text"] to perform semantic keyword tracking during cluster setup
+    cluster_labels, cluster_severity_map = perform_clustering(embeddings, df["combined_text"])
+
     # 1. Vectorized Resolution Time Quantiles Calculation
     res_times = df["Resolution_Time_Hours"]
     p25, p50, p75, p90 = res_times.quantile([0.25, 0.50, 0.75, 0.90])
@@ -494,7 +519,7 @@ def generate_pseudo_labels(
                                 np.where(res_times <= p75, 0.70,
                                 np.where(res_times <= p90, 0.85, 0.95)))))
 
-    # 2. Corrected Cluster Severity Mapping (Uses actual generated K-Means labels array)
+    # 2. Corrected Cluster Severity Mapping (Uses actual generated semantic K-Means labels array)
     df["Cluster_Severity"] = pd.Series(cluster_labels).map(cluster_severity_map).fillna(0.5).values
 
     # 3. Optimized Batched GPU Tokenization Pipeline Mapping

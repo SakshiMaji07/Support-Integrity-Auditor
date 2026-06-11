@@ -143,9 +143,9 @@ def run_stage2(
 
     # Step 2: Offload text processing, mapping, and tokenization to stage2_preprocessing
     logger.info("Step 2/4: Transferring records data matrix to feature processing framework...")
+    # train_pipeline.py line 117-120
     train_dataset, val_dataset, test_dataset, preprocessing_artifacts = prepare_stage2_data(
-        df=raw_df, 
-        seed=random_seed
+        filepath=dataset_path
     )
 
     # Step 3: Extract and print statistical insights about data splits and class profiles

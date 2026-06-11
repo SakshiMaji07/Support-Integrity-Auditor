@@ -186,12 +186,12 @@ def predict_ticket(
         logits = model(
             input_ids=tokenized["input_ids"].to(device),
             attention_mask=tokenized["attention_mask"].to(device),
-            channel=torch.tensor([encoded_ch], dtype=torch.long, device=device),
-            domain_tier=torch.tensor([encoded_dom], dtype=torch.long, device=device),
-            llm_severity=torch.tensor([scaled_severities[0]], dtype=torch.float32, device=device),
-            resolution_severity=torch.tensor([scaled_severities[1]], dtype=torch.float32, device=device),
-            cluster_severity=torch.tensor([scaled_severities[2]], dtype=torch.float32, device=device),
-            fused_severity=torch.tensor([scaled_severities[3]], dtype=torch.float32, device=device)
+            channel=torch.tensor(encoded_ch, dtype=torch.long, device=device),
+            domain_tier=torch.tensor(encoded_dom, dtype=torch.long, device=device),
+            llm_severity=torch.tensor(scaled_severities[0], dtype=torch.float32, device=device),
+            resolution_severity=torch.tensor(scaled_severities[1], dtype=torch.float32, device=device),
+            cluster_severity=torch.tensor(scaled_severities[2], dtype=torch.float32, device=device),
+            fused_severity=torch.tensor(scaled_severities[3], dtype=torch.float32, device=device)
         )
         probs = F.softmax(logits, dim=1)
         prediction = torch.argmax(probs, dim=1).item()

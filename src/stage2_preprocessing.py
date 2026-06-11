@@ -24,6 +24,17 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 import torch
 from torch.utils.data import Dataset
 
+def set_seed(seed: int = 42) -> None:
+    """Sets reproducibility seeds across all libraries."""
+    import random
+    import torch
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 # Setup logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +62,10 @@ class SIADataset(Dataset):
         self.domain_tiers = df["encoded_domain_tier"].astype(int).tolist()
         
         # Severity metrics arrays
+        required_severity_cols = ["LLM_Severity", "Resolution_Severity", "Cluster_Severity", "Fused_Severity"]
+        missing_cols = [col for col in required_severity_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required severity columns: {missing_cols}")
         self.llm_severity = df["LLM_Severity"].astype(float).tolist()
         self.resolution_severity = df["Resolution_Severity"].astype(float).tolist()
         self.cluster_severity = df["Cluster_Severity"].astype(float).tolist()

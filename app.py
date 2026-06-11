@@ -22,15 +22,16 @@ import seaborn as sns
 import streamlit as st
 
 # Ensure core repository files are importable
-sys.path.append(str(Path(__file__).resolve().parent)))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 try:
     from predict import load_model, predict_ticket, predict_batch
-    from dossier_generator import build_dossier, determine_mismatch_type
-except ImportError:
-    # Alternative import structure for source pathing layouts
-    from predict import load_model, predict_ticket, predict_batch
     from src.dossier_generator import build_dossier, determine_mismatch_type
+except ImportError:
+    from predict import load_model, predict_ticket, predict_batch
+    from dossier_generator import build_dossier, determine_mismatch_type
+
+from src.dossier_generator import PRIORITY_TO_SEVERITY_MAP
 
 # Configure logging patterns
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +54,7 @@ st.markdown("""
     .mismatch-alert { background-color: #FEF2F2; border-left: 5px solid #DC2626; padding: 1rem; border-radius: 0.25rem; }
     .consistent-alert { background-color: #F0FDF4; border-left: 5px solid #16A34A; padding: 1rem; border-radius: 0.25rem; }
     </style>
-""", unsafe_with_html=True)
+""", unsafe_allow_html=True)
 
 
 @st.cache_resource(show_spinner="Mounting fine-tuned DeBERTa Multimodal Framework...")
@@ -82,7 +83,7 @@ st.sidebar.markdown("Stage 2: Priority-Severity Alignment Auditor")
 
 app_mode = st.sidebar.radio(
     "Select Navigation Track",
-    [" Executive Analytics Dashboard", "🔍 Single Ticket Real-Time Audit", "📁 Bulk Data Batch Processing"]
+    ["Executive Analytics Dashboard", "Single Ticket Real-Time Audit", "Bulk Data Batch Processing"]
 )
 
 st.sidebar.markdown("---")
@@ -111,9 +112,12 @@ if app_mode == "Executive Analytics Dashboard":
         # Self-compute predictions for metrics tracking if mapping historic raw data sets
         if "Prediction" not in df.columns and "Inferred_Severity" in df.columns:
             # Rule based fallback calculations mapping
-            from dossier_generator import PRIORITY_TO_SEVERITY_MAP
+            if "Inferred_Severity" not in df.columns:
+                st.error("Missing 'Inferred_Severity' column in predictions CSV.")
+                st.stop()
+
             p_mapped = df["Priority_Level"].map(PRIORITY_TO_SEVERITY_MAP).fillna(2)
-            df["Prediction"] = (df["Inferred_Severity"] != p_mapped).astype(int)
+            df["Prediction"] = (np.abs(df["Inferred_Severity"] - p_mapped) >= 1).astype(int)
             df["Confidence"] = np.random.uniform(0.85, 0.99, len(df)) # Placeholder profile
 
         # Ensure dynamic categorical assignment metrics are explicitly available

@@ -29,6 +29,9 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+from typing import Iterator
+import functools
+
 # Ensure script can locate stage2_preprocessing.py in the project structure
 sys.path.append(str(Path(__file__).resolve().parent))
 try:
@@ -42,6 +45,47 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("stage2_training")
+
+
+class SIAPreTokenizedDataset(SIADataset):
+    """Pre-tokenized dataset for faster training."""
+    
+    def __init__(self, df: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, max_length: int = 512) -> None:
+        super().__init__(df)
+        # Pre-tokenize all texts once at initialization
+        texts = df["combined_text"].astype(str).tolist()
+        tokenized = tokenizer(
+            texts,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt"
+        )
+        self.input_ids = tokenized["input_ids"]
+        self.attention_mask = tokenized["attention_mask"]
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = super().__getitem__(idx)
+        item["input_ids"] = self.input_ids[idx]
+        item["attention_mask"] = self.attention_mask[idx]
+        return item
+
+
+class SIAOptimizedCollator:
+    """Optimized collator that assumes pre-tokenized data."""
+    
+    def __call__(self, batch: list) -> Dict[str, torch.Tensor]:
+        return {
+            "input_ids": torch.stack([item["input_ids"] for item in batch]),
+            "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
+            "channel": torch.stack([item["channel"] for item in batch]),
+            "domain_tier": torch.stack([item["domain_tier"] for item in batch]),
+            "llm_severity": torch.stack([item["llm_severity"] for item in batch]),
+            "resolution_severity": torch.stack([item["resolution_severity"] for item in batch]),
+            "cluster_severity": torch.stack([item["cluster_severity"] for item in batch]),
+            "fused_severity": torch.stack([item["fused_severity"] for item in batch]),
+            "label": torch.stack([item["label"] for item in batch])
+        }
 
 
 class SIAMultimodalModel(nn.Module):
@@ -97,41 +141,6 @@ class SIAMultimodalModel(nn.Module):
         return self.classifier(combined_features)
 
 
-class SIADynamicDataCollator:
-    """
-    Data Collator that performs dynamic batch padding on text fields 
-    on-the-fly, reducing GPU sequence padding overhead.
-    """
-
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, max_length: int = 512) -> None:
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __call__(self, batch: list) -> Dict[str, torch.Tensor]:
-        texts = [item["text"] for item in batch]
-        
-        # Pad dynamically to the maximum sequence length inside this specific batch
-        tokenized = self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-        
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "channel": torch.stack([item["channel"] for item in batch]),
-            "domain_tier": torch.stack([item["domain_tier"] for item in batch]),
-            "llm_severity": torch.stack([item["llm_severity"] for item in batch]),
-            "resolution_severity": torch.stack([item["resolution_severity"] for item in batch]),
-            "cluster_severity": torch.stack([item["cluster_severity"] for item in batch]),
-            "fused_severity": torch.stack([item["fused_severity"] for item in batch]),
-            "label": torch.stack([item["label"] for item in batch])
-        }
-
-
 def set_seed(seed: int = 42) -> None:
     """Sets reproducibility seeds across all libraries."""
     random.seed(seed)
@@ -182,32 +191,58 @@ def train_model(
     epochs: int = 4,
     batch_size: int = 32,
     learning_rate: float = 2e-5,
-    patience: int = 2
+    patience: int = 2,
+    accumulation_steps: int = 4,
+    num_workers: int = 4
 ) -> nn.Module:
     """
-    Orchestrates the model training routine. Utilizes Automatic Mixed Precision (AMP)
-    to optimize GPU execution speeds.
+    Optimized training with:
+    - Pre-tokenization
+    - Gradient accumulation
+    - Multi-worker DataLoading
+    - Mixed precision
+    - Progressive validation reduction
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Targeting training execution platform: {device}")
     model.to(device)
 
-    collator = SIADynamicDataCollator(tokenizer=tokenizer)
+    # Pre-tokenize datasets ONCE
+    logger.info("Pre-tokenizing training and validation datasets...")
+    train_pretok = SIAPreTokenizedDataset(train_dataset.df, tokenizer) if hasattr(train_dataset, 'df') else train_dataset
+    val_pretok = SIAPreTokenizedDataset(val_dataset.df, tokenizer) if hasattr(val_dataset, 'df') else val_dataset
     
-    # Fast performance configuration: pin_memory=True speeds up transfer to CUDA GPUs
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collator, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collator, pin_memory=True)
+    collator = SIAOptimizedCollator()
+    
+    # Optimized DataLoader with multiple workers and prefetching
+    train_loader = DataLoader(
+        train_pretok,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collator,
+        pin_memory=True,
+        num_workers=num_workers,
+        prefetch_factor=2
+    )
+    val_loader = DataLoader(
+        val_pretok,
+        batch_size=batch_size * 2,  # Larger batch for validation (no backprop)
+        shuffle=False,
+        collate_fn=collator,
+        pin_memory=True,
+        num_workers=num_workers,
+        prefetch_factor=2
+    )
 
     class_weights = compute_class_weights(train_dataset).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    total_steps = len(train_loader) * epochs
+    total_steps = (len(train_loader) * epochs) // accumulation_steps
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps
     )
 
-    # AMP components initialization
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_loss = float("inf")
     patience_counter = 0
@@ -217,11 +252,10 @@ def train_model(
     for epoch in range(1, epochs + 1):
         model.train()
         total_train_loss = 0.0
+        step_count = 0
+        optimizer.zero_grad()
         
-        for batch in train_loader:
-            optimizer.zero_grad()
-            
-            # Map batch tokens to target runtime execution device
+        for batch_idx, batch in enumerate(train_loader):
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             channel = batch["channel"].to(device, non_blocking=True)
@@ -232,67 +266,128 @@ def train_model(
             fus_sev = batch["fused_severity"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
 
-            # Cast forward pass into autocast mixed precision block for maximum GPU performance
+            # Forward + backward with AMP
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 logits = model(
                     input_ids, attention_mask, channel, domain_tier,
                     llm_sev, res_sev, clu_sev, fus_sev
                 )
-                loss = criterion(logits, labels)
+                loss = criterion(logits, labels) / accumulation_steps  # Scale loss
 
-            # Backward pass using AMP scaled gradients
             scaler.scale(loss).backward()
             
-            # Clip unscaled gradients to guard against gradient explosions
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
+            # Accumulate gradients
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+                step_count += 1
 
-            total_train_loss += loss.item()
-
-        # Validation phase
-        model.eval()
-        total_val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                    logits = model(
-                        batch["input_ids"].to(device, non_blocking=True),
-                        batch["attention_mask"].to(device, non_blocking=True),
-                        batch["channel"].to(device, non_blocking=True),
-                        batch["domain_tier"].to(device, non_blocking=True),
-                        batch["llm_severity"].to(device, non_blocking=True),
-                        batch["resolution_severity"].to(device, non_blocking=True),
-                        batch["cluster_severity"].to(device, non_blocking=True),
-                        batch["fused_severity"].to(device, non_blocking=True)
-                    )
-                    v_loss = criterion(logits, batch["label"].to(device, non_blocking=True))
-                total_val_loss += v_loss.item()
+            total_train_loss += loss.item() * accumulation_steps
 
         avg_train_loss = total_train_loss / len(train_loader)
-        avg_val_loss = total_val_loss / len(val_loader)
-        logger.info(f"Epoch {epoch}/{epochs} Summary -> Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
+        # Validation (skip every other epoch for speed on large datasets)
+        if epoch % 2 == 1 or epoch == epochs:
+            model.eval()
+            total_val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                        logits = model(
+                            batch["input_ids"].to(device, non_blocking=True),
+                            batch["attention_mask"].to(device, non_blocking=True),
+                            batch["channel"].to(device, non_blocking=True),
+                            batch["domain_tier"].to(device, non_blocking=True),
+                            batch["llm_severity"].to(device, non_blocking=True),
+                            batch["resolution_severity"].to(device, non_blocking=True),
+                            batch["cluster_severity"].to(device, non_blocking=True),
+                            batch["fused_severity"].to(device, non_blocking=True)
+                        )
+                        v_loss = criterion(logits, batch["label"].to(device, non_blocking=True))
+                    total_val_loss += v_loss.item()
 
-        # Convergence evaluation & Early stopping execution tracks
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), best_weights_path)
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                logger.warning(f"Early stopping condition triggered at epoch {epoch}.")
-                break
+            avg_val_loss = total_val_loss / len(val_loader)
+            logger.info(f"Epoch {epoch}/{epochs} Summary -> Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
-    # Re-apply optimal historical parameters checkpoint if created
+            # Early stopping
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                torch.save(model.state_dict(), best_weights_path)
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    logger.warning(f"Early stopping condition triggered at epoch {epoch}.")
+                    break
+
+    # Load best weights
     if best_weights_path.exists():
         model.load_state_dict(torch.load(best_weights_path, map_location=device))
         os.remove(best_weights_path)
         
     return model
+
+
+def train(
+    train_data: SIADataset,
+    val_data: SIADataset,
+    test_data: SIADataset,
+    artifacts: Dict[str, Any],
+    seed: int = 42,
+    epochs: int = 5,
+    batch_size: int = 32,
+    learning_rate: float = 2e-5
+) -> Tuple[nn.Module, Dict[str, float]]:
+    """
+    Wrapper function for training pipeline orchestration.
+    
+    Args:
+        train_data: Training dataset
+        val_data: Validation dataset
+        test_data: Test dataset
+        artifacts: Preprocessing artifacts dict (encoders, scalers)
+        seed: Random seed for reproducibility
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+        learning_rate: Learning rate for optimizer
+    
+    Returns:
+        Tuple of (trained_model, metrics_dict)
+    """
+    set_seed(seed)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Training on device: {device}")
+    
+    # Get tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-small")
+    
+    # Build model
+    model = SIAMultimodalModel("microsoft/deberta-v3-small", num_labels=2)
+    
+    # Train
+    trained_model = train_model(
+        model=model,
+        train_dataset=train_data,
+        val_dataset=val_data,
+        tokenizer=tokenizer,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        patience=2
+    )
+    
+    # Evaluate
+    metrics = evaluate_model(trained_model, test_data, tokenizer)
+    
+    # Save
+    save_model(trained_model, tokenizer, "models/deberta_sia/")
+    
+    return trained_model, metrics
 
 
 def evaluate_model(model: nn.Module, test_dataset: SIADataset, tokenizer: PreTrainedTokenizerBase) -> Dict[str, float]:
@@ -302,7 +397,7 @@ def evaluate_model(model: nn.Module, test_dataset: SIADataset, tokenizer: PreTra
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     
-    collator = SIADynamicDataCollator(tokenizer=tokenizer)
+    collator = SIAOptimizedCollator(tokenizer=tokenizer)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=collator, pin_memory=True)
     
     all_preds = []
@@ -323,7 +418,7 @@ def evaluate_model(model: nn.Module, test_dataset: SIADataset, tokenizer: PreTra
                 )
             preds = torch.argmax(logits, dim=1).cpu().numpy()
             all_preds.extend(preds)
-            all_labels.extend(batch["label"].numpy())
+            all_labels.extend(batch["label"].cpu().numpy())
 
     accuracy = accuracy_score(all_labels, all_preds)
     precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average="macro", zero_division=0)
@@ -379,13 +474,15 @@ if __name__ == "__main__":
 
     # 4. Multimodal Model Optimization Training Run
     trained_sia_network = train_model(
-        model=sia_network,
-        train_dataset=train_data,
-        val_dataset=val_data,
-        tokenizer=tokenizer_obj,
-        epochs=5,
-        batch_size=32,
-        learning_rate=2e-5
+    model=sia_network,
+    train_dataset=train_data,
+    val_dataset=val_data,
+    tokenizer=tokenizer_obj,
+    epochs=5,
+    batch_size=32,
+    learning_rate=2e-5,
+    accumulation_steps=4,
+    num_workers=4
     )
 
     # 5. Evaluate Holdout Validation Metrics Profile
