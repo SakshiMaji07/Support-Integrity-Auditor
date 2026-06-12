@@ -84,6 +84,13 @@ def _load_llm_pipeline() -> None:
     auth_token = _get_hf_token()
     auth_kwargs = {"token": auth_token} if auth_token else {}
     
+    # Debug: Log token presence
+    if auth_token:
+        token_preview = auth_token[:10] + "..." if len(auth_token) > 10 else auth_token
+        logger.info("Using HF token: %s", token_preview)
+    else:
+        logger.warning("No HF_TOKEN found in environment variables")
+    
     cuda_available = torch.cuda.is_available()
     model_kwargs = {"torch_dtype": torch.float16 if cuda_available else torch.float32}
     
@@ -107,17 +114,23 @@ def _load_llm_pipeline() -> None:
         return tokenizer, model
 
     try:
+        logger.info("Attempting to load LLM from local cache...")
         tokenizer, model = _load_from_hub(local_only=True)
         logger.info("Loaded LLM from local cache.")
-    except Exception:
+    except Exception as local_exc:
+        logger.info("Local cache load failed (expected if first time): %s", str(local_exc)[:100])
         try:
+            logger.info("Attempting to load LLM from HuggingFace Hub...")
             tokenizer, model = _load_from_hub(local_only=False)
             logger.info("Loaded LLM from HF Hub.")
-        except Exception as exc:
-            logger.warning(
-                "Unable to load HF model for LLM severity inference: %s. "
+        except Exception as hub_exc:
+            logger.error(
+                "Unable to load HF model for LLM severity inference.\n"
+                "Error type: %s\n"
+                "Error message: %s\n"
                 "Falling back to keyword-based severity.",
-                exc,
+                type(hub_exc).__name__,
+                str(hub_exc),
             )
             _phi3_pipe = None
             return
