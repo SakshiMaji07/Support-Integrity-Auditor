@@ -84,53 +84,59 @@ def _load_llm_pipeline() -> None:
     auth_token = _get_hf_token()
     auth_kwargs = {"token": auth_token} if auth_token else {}
     
-    # Debug: Log token presence
-    if auth_token:
-        token_preview = auth_token[:10] + "..." if len(auth_token) > 10 else auth_token
-        logger.info("Using HF token: %s", token_preview)
-    else:
-        logger.warning("No HF_TOKEN found in environment variables")
-    
     cuda_available = torch.cuda.is_available()
-    model_kwargs = {"torch_dtype": torch.float16 if cuda_available else torch.float32}
+    # Use dtype instead of torch_dtype (newer transformers API)
+    model_kwargs = {"dtype": torch.float16 if cuda_available else torch.float32}
     
     if _has_accelerate() and cuda_available:
         model_kwargs["device_map"] = "auto"
 
     def _load_from_hub(local_only: bool) -> tuple[Any, Any]:
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_NAME,
-            local_files_only=local_only,
-            trust_remote_code=True,
-            **auth_kwargs,
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            local_files_only=local_only,
-            trust_remote_code=True,
-            **model_kwargs,
-            **auth_kwargs,
-        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                MODEL_NAME,
+                local_files_only=local_only,
+                trust_remote_code=True,
+                **auth_kwargs,
+            )
+        except Exception as e:
+            logger.warning("Failed to load tokenizer: %s. Falling back to keyword-based severity.", str(e)[:100])
+            return None, None
+        
+        try:
+            # Load model without custom attention implementation to avoid compatibility issues
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                local_files_only=local_only,
+                trust_remote_code=True,
+                **model_kwargs,
+                **auth_kwargs,
+            )
+        except Exception as e:
+            logger.warning("Failed to load model: %s. Falling back to keyword-based severity.", str(e)[:100])
+            return None, None
+        
         return tokenizer, model
 
     try:
         logger.info("Attempting to load LLM from local cache...")
         tokenizer, model = _load_from_hub(local_only=True)
-        logger.info("Loaded LLM from local cache.")
-    except Exception as local_exc:
-        logger.info("Local cache load failed (expected if first time): %s", str(local_exc)[:100])
+        if tokenizer is None or model is None:
+            raise RuntimeError("Local cache load returned None")
+        logger.info("✓ Loaded LLM from local cache.")
+    except Exception:
         try:
             logger.info("Attempting to load LLM from HuggingFace Hub...")
             tokenizer, model = _load_from_hub(local_only=False)
-            logger.info("Loaded LLM from HF Hub.")
+            if tokenizer is None or model is None:
+                raise RuntimeError("Hub load returned None")
+            logger.info("✓ Loaded LLM from HF Hub successfully!")
         except Exception as hub_exc:
-            logger.error(
-                "Unable to load HF model for LLM severity inference.\n"
-                "Error type: %s\n"
-                "Error message: %s\n"
-                "Falling back to keyword-based severity.",
-                type(hub_exc).__name__,
-                str(hub_exc),
+            logger.warning(
+                "Unable to load HF model for LLM severity inference. "
+                "Falling back to keyword-based severity. "
+                "Error: %s",
+                str(hub_exc)[:200],
             )
             _phi3_pipe = None
             return
@@ -144,13 +150,18 @@ def _load_llm_pipeline() -> None:
         tokenizer.pad_token = tokenizer.eos_token
         model.config.pad_token_id = model.config.eos_token_id
 
-    _phi3_pipe = pipeline(
-        "text-generation", 
-        model=model, 
-        tokenizer=tokenizer, 
-        device=device,
-        batch_size=32
-    )
+    try:
+        _phi3_pipe = pipeline(
+            "text-generation", 
+            model=model, 
+            tokenizer=tokenizer, 
+            device=device,
+            batch_size=32
+        )
+        logger.info("✓ LLM pipeline initialized and ready for inference")
+    except Exception as e:
+        logger.warning("Failed to create pipeline: %s. Falling back to keyword-based severity.", str(e)[:100])
+        _phi3_pipe = None
 
 
 def _keyword_severity_fallback(text: str) -> float:
@@ -219,6 +230,7 @@ def get_llm_severity_batch(texts: pd.Series) -> list[float]:
     _load_llm_pipeline()
     
     if _phi3_pipe is None:
+        logger.info("Using keyword-based severity inference (LLM unavailable)")
         return [_keyword_severity_fallback(t) for t in texts]
 
     scores = []
@@ -249,7 +261,7 @@ def get_llm_severity_batch(texts: pd.Series) -> list[float]:
                 scores.append(_keyword_severity_fallback(texts.iloc[idx]))
                 
     except Exception as exc:
-        logger.warning("Pipeline batch processing failed. Running safe baseline fallbacks instead: %s", exc)
+        logger.warning("Pipeline batch processing failed. Running keyword fallbacks instead: %s", str(exc)[:100])
         return [_keyword_severity_fallback(t) for t in texts]
 
     return scores
@@ -281,7 +293,7 @@ def generate_cluster_profiles(
     texts: pd.Series,
     cluster_labels: np.ndarray,
     n_clusters: int = 5,
-    top_n: int = 5,  # Increased default slightly for better semantic analysis mapping
+    top_n: int = 5,
 ) -> dict[int, str]:
     """Generate human-readable profile for each cluster using TF-IDF."""
     profiles = {}
