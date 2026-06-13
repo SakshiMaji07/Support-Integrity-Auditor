@@ -86,7 +86,7 @@ def _load_llm_pipeline() -> None:
     
     cuda_available = torch.cuda.is_available()
     # Use dtype instead of torch_dtype (newer transformers API)
-    model_kwargs = {"dtype": torch.float16 if cuda_available else torch.float32}
+    model_kwargs = {"torch_dtype": torch.float16 if cuda_available else torch.float32}
     
     if _has_accelerate() and cuda_available:
         model_kwargs["device_map"] = "auto"
