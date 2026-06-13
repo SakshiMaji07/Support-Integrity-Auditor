@@ -233,6 +233,12 @@ def main() -> None:
         help="Destination target output path for tracking quality assurance execution run profiles.",
     )
     parser.add_argument(
+        "--metrics-output-path",
+        type=str,
+        default=None,
+        help="Output path for Stage 2 metrics.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -255,13 +261,9 @@ def main() -> None:
         pseudo_labels_path=args.pseudo_labels_path,
         summary_output_path=args.summary_output_path,
     )
-
+    
     run_stage2(
         dataset_path=args.pseudo_labels_path,
         metrics_output_path=args.metrics_output_path,
         random_seed=args.seed
     )
-
-
-if __name__ == "__main__":
-    main()
