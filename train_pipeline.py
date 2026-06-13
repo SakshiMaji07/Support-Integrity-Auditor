@@ -256,6 +256,12 @@ def main() -> None:
         summary_output_path=args.summary_output_path,
     )
 
+    run_stage2(
+        dataset_path=args.pseudo_labels_path,
+        metrics_output_path=args.metrics_output_path,
+        random_seed=args.seed
+    )
+
 
 if __name__ == "__main__":
     main()
