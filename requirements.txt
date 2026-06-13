@@ -4,9 +4,9 @@ numpy==1.26.4
 scikit-learn==1.3.2
 
 # PyTorch (CUDA 12.1 compatible - must be installed first)
-torch==2.2.2+cu121
-torchvision==0.17.2+cu121
-torchaudio==2.1.2+cu121
+#torch==2.2.2+cu121
+#torchvision==0.17.2+cu121
+#torchaudio==2.1.2+cu121
 
 # Transformers & HuggingFace Stack
 transformers==4.44.2
