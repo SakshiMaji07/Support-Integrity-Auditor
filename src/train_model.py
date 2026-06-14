@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -57,6 +58,7 @@ class SIAPreTokenizedDataset(SIADataset):
         super().__init__(df)
         # Pre-tokenize all texts once at initialization
         texts = df["combined_text"].astype(str).tolist()
+        logger.info(f"Pre-tokenizing {len(texts)} text samples...")
         tokenized = tokenizer(
             texts,
             padding="max_length",
@@ -66,6 +68,7 @@ class SIAPreTokenizedDataset(SIADataset):
         )
         self.input_ids = tokenized["input_ids"]
         self.attention_mask = tokenized["attention_mask"]
+        logger.info(f"Pre-tokenization complete. Token shape: {self.input_ids.shape}")
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = super().__getitem__(idx)
@@ -76,6 +79,10 @@ class SIAPreTokenizedDataset(SIADataset):
 
 class SIAOptimizedCollator:
     """Optimized collator that assumes pre-tokenized data."""
+    
+    def __init__(self, tokenizer: PreTrainedTokenizerBase | None = None) -> None:
+        """Initialize collator. Tokenizer parameter kept for API compatibility."""
+        self.tokenizer = tokenizer
     
     def __call__(self, batch: list) -> Dict[str, torch.Tensor]:
         return {
@@ -112,6 +119,7 @@ class SIAMultimodalModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(256, num_labels)
         )
+        logger.info(f"SIAMultimodalModel initialized with input_dim={input_dim}, output_dim={num_labels}")
 
     def forward(
         self, 
@@ -153,18 +161,27 @@ def set_seed(seed: int = 42) -> None:
     logger.info(f"Reproducibility seed locked at: {seed}")
 
 
-def create_dataset(filepath: str | Path) -> Tuple[SIADataset, SIADataset, SIADataset]:
+def create_dataset(
+    filepath: str | Path,
+    pseudo_labels_filepath: str | Path | None = None
+) -> Tuple[SIADataset, SIADataset, SIADataset]:
     """
     Imports and instantiates structural dataframes via stage2_preprocessing pipeline.
 
+    UPDATED: Now accepts both ticket data and pseudo-labels paths to match new data flow.
+
     Args:
-        filepath (str | Path): Path to the pseudo-labeled tickets.
+        filepath (str | Path): Path to evidence.csv or processed.csv (PRIMARY ticket data with text).
+        pseudo_labels_filepath (str | Path | None): Path to pseudo_labeled_tickets.csv for annotations.
 
     Returns:
         Tuple[SIADataset, SIADataset, SIADataset]: Train, validation, and test dataset instances.
     """
-    logger.info("Extracting data partitions from stage2_preprocessing pipeline...")
-    train_ds, val_ds, test_ds, _ = prepare_stage2_data(filepath)
+    logger.info(f"Extracting data partitions from stage2_preprocessing pipeline...")
+    logger.info(f"  Primary data source: {filepath}")
+    if pseudo_labels_filepath:
+        logger.info(f"  Secondary labels source: {pseudo_labels_filepath}")
+    train_ds, val_ds, test_ds, _ = prepare_stage2_data(filepath, pseudo_labels_filepath)
     return train_ds, val_ds, test_ds
 
 
@@ -215,7 +232,7 @@ def train_model(
     train_pretok = SIAPreTokenizedDataset(train_dataset.df, tokenizer) if hasattr(train_dataset, 'df') else train_dataset
     val_pretok = SIAPreTokenizedDataset(val_dataset.df, tokenizer) if hasattr(val_dataset, 'df') else val_dataset
     
-    collator = SIAOptimizedCollator()
+    collator = SIAOptimizedCollator(tokenizer=tokenizer)
     
     # Optimized DataLoader with multiple workers and prefetching
     train_loader = DataLoader(
@@ -331,6 +348,7 @@ def train_model(
     if best_weights_path.exists():
         model.load_state_dict(torch.load(best_weights_path, map_location=device))
         os.remove(best_weights_path)
+        logger.info("Restored best model weights.")
         
     return model
 
@@ -349,7 +367,7 @@ def train(
     Wrapper function for training pipeline orchestration.
     
     Args:
-        train_data: Training dataset
+        train_data: Training dataset (from stage2_preprocessing with evidence.csv-sourced text)
         val_data: Validation dataset
         test_data: Test dataset
         artifacts: Preprocessing artifacts dict (encoders, scalers)
@@ -456,17 +474,24 @@ def save_model(model: nn.Module, tokenizer: PreTrainedTokenizerBase, output_dir:
 
 
 if __name__ == "__main__":
+    # UPDATED: Now uses evidence.csv as primary data source (contains ticket text)
     DATA_PATH = Path("data/processed/evidence.csv")
+    PSEUDO_LABELS_PATH = Path("data/processed/pseudo_labeled_tickets.csv")
     MODEL_DIR = Path("models/deberta_sia/")
     
     set_seed(42)
 
     if not DATA_PATH.exists():
-        logger.error(f"SIA Execution halted. Pseudo-labeled data source mapping file not found at: {DATA_PATH}")
+        logger.error(f"SIA Execution halted. PRIMARY ticket data not found at: {DATA_PATH}")
+        logger.error(f"Expected evidence.csv or processed.csv with Ticket_Subject and Ticket_Description columns.")
         sys.exit(1)
 
+    logger.info(f"Loading data from PRIMARY source: {DATA_PATH}")
+    if PSEUDO_LABELS_PATH.exists():
+        logger.info(f"Loading annotations from SECONDARY source: {PSEUDO_LABELS_PATH}")
+
     # 1. Pipeline Dataset Load Initialization
-    train_data, val_data, test_data = create_dataset(DATA_PATH)
+    train_data, val_data, test_data = create_dataset(DATA_PATH, PSEUDO_LABELS_PATH)
     
     # 2. Tokenizer Instance Mounting
     logger.info("Downloading/instantiating DeBERTa tokenizer parameters...")
@@ -477,15 +502,15 @@ if __name__ == "__main__":
 
     # 4. Multimodal Model Optimization Training Run
     trained_sia_network = train_model(
-    model=sia_network,
-    train_dataset=train_data,
-    val_dataset=val_data,
-    tokenizer=tokenizer_obj,
-    epochs=5,
-    batch_size=32,
-    learning_rate=2e-5,
-    accumulation_steps=4,
-    num_workers=4
+        model=sia_network,
+        train_dataset=train_data,
+        val_dataset=val_data,
+        tokenizer=tokenizer_obj,
+        epochs=5,
+        batch_size=32,
+        learning_rate=2e-5,
+        accumulation_steps=4,
+        num_workers=4
     )
 
     # 5. Evaluate Holdout Validation Metrics Profile
