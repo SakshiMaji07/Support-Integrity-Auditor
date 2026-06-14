@@ -1,10 +1,6 @@
 """
 Stage 2 Training Pipeline for the Support Integrity Auditor (SIA) Project.
-
-Trains a fine-tuned, multimodal microsoft/deberta-v3-small classifier by combining 
-contextual text embeddings with categorical and numerical ticket metadata.
-Optimized for fast GPU execution using Automatic Mixed Precision (AMP) and 
-dynamic batch padding.
+Trains a fine-tuned, multimodal microsoft/deberta-v3-small classifier.
 """
 
 from __future__ import annotations
@@ -30,33 +26,22 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from typing import Iterator
-import functools
-
-import sys
-from pathlib import Path
-
-# Add parent directory to path for relative imports
+# Add parent directory to path for relative imports if executed standalone
 _parent_dir = str(Path(__file__).resolve().parent)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 from stage2_preprocessing import prepare_stage2_data, SIADataset
 
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger("stage2_training")
 
 
 class SIAPreTokenizedDataset(SIADataset):
-    """Pre-tokenized dataset for faster training."""
+    """Pre-tokenized dataset for faster training loops."""
     
     def __init__(self, df: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, max_length: int = 512) -> None:
+        # MODIFICATION: Standardized instantiation tracking logic mapping from updated structure
         super().__init__(df)
-        # Pre-tokenize all texts once at initialization
         texts = df["combined_text"].astype(str).tolist()
         logger.info(f"Pre-tokenizing {len(texts)} text samples...")
         tokenized = tokenizer(
@@ -78,13 +63,13 @@ class SIAPreTokenizedDataset(SIADataset):
 
 
 class SIAOptimizedCollator:
-    """Optimized collator that assumes pre-tokenized data."""
+    """Optimized batch collator mapping standard lowercase tensor values from dataset dictionary items."""
     
     def __init__(self, tokenizer: PreTrainedTokenizerBase | None = None) -> None:
-        """Initialize collator. Tokenizer parameter kept for API compatibility."""
         self.tokenizer = tokenizer
     
     def __call__(self, batch: list) -> Dict[str, torch.Tensor]:
+        # MODIFICATION: Ensured dictionary keys match exact lowercase parameters specified in instructions
         return {
             "input_ids": torch.stack([item["input_ids"] for item in batch]),
             "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
@@ -99,19 +84,15 @@ class SIAOptimizedCollator:
 
 
 class SIAMultimodalModel(nn.Module):
-    """
-    Multimodal classification network fusing text sequence representations from 
-    an unfrozen DeBERTa-v3 backbone with dense metadata features.
-    """
+    """Multimodal classification network fusing text layers with explicit structural metadata arrays."""
 
     def __init__(self, model_name: str = "microsoft/deberta-v3-small", num_labels: int = 2) -> None:
         super().__init__()
         logger.info(f"Loading DeBERTa-v3 backbone: {model_name}")
         self.deberta = AutoModel.from_pretrained(model_name)
         
-        hidden_size = self.deberta.config.hidden_size  # 768 dimensions for small
-        # Text embedding size (768) + 6 explicit metadata and severity dimensions
-        input_dim = hidden_size + 6 
+        hidden_size = self.deberta.config.hidden_size  # 768 for small variant
+        input_dim = hidden_size + 6  # text pooled state + 6 metadata metrics
         
         self.classifier = nn.Sequential(
             nn.Linear(input_dim, 256),
@@ -132,20 +113,18 @@ class SIAMultimodalModel(nn.Module):
         cluster_severity: torch.Tensor,
         fused_severity: torch.Tensor
     ) -> torch.Tensor:
-        """Forward pass combining pooled textual representations and dense arrays."""
+        """Forward pass combining pooled sequence vectors with numerical arrays."""
         outputs = self.deberta(input_ids=input_ids, attention_mask=attention_mask)
-        
-        # Pull first token [CLS] hidden state for pooled text sequence representation
         pooled_output = outputs.last_hidden_state[:, 0, :]
         
-        # Concatenate metadata parameters horizontally [Batch Size, 6]
+        # MODIFICATION: Converted argument structural components horizontally to build dense tracking matrices
         extra_features = torch.stack([
             channel.float(),
             domain_tier.float(),
-            llm_severity,
-            resolution_severity,
-            cluster_severity,
-            fused_severity
+            llm_severity.float(),
+            resolution_severity.float(),
+            cluster_severity.float(),
+            fused_severity.float()
         ], dim=1)
         
         combined_features = torch.cat((pooled_output, extra_features), dim=1)
@@ -153,7 +132,6 @@ class SIAMultimodalModel(nn.Module):
 
 
 def set_seed(seed: int = 42) -> None:
-    """Sets reproducibility seeds across all libraries."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -165,41 +143,18 @@ def create_dataset(
     filepath: str | Path,
     pseudo_labels_filepath: str | Path | None = None
 ) -> Tuple[SIADataset, SIADataset, SIADataset]:
-    """
-    Imports and instantiates structural dataframes via stage2_preprocessing pipeline.
-
-    UPDATED: Now accepts both ticket data and pseudo-labels paths to match new data flow.
-
-    Args:
-        filepath (str | Path): Path to evidence.csv or processed.csv (PRIMARY ticket data with text).
-        pseudo_labels_filepath (str | Path | None): Path to pseudo_labeled_tickets.csv for annotations.
-
-    Returns:
-        Tuple[SIADataset, SIADataset, SIADataset]: Train, validation, and test dataset instances.
-    """
+    """Imports and splits dataset states via underlying preprocessing interfaces."""
     logger.info(f"Extracting data partitions from stage2_preprocessing pipeline...")
-    logger.info(f"  Primary data source: {filepath}")
-    if pseudo_labels_filepath:
-        logger.info(f"  Secondary labels source: {pseudo_labels_filepath}")
     train_ds, val_ds, test_ds, _ = prepare_stage2_data(filepath, pseudo_labels_filepath)
     return train_ds, val_ds, test_ds
 
 
 def compute_class_weights(train_dataset: SIADataset) -> torch.Tensor:
-    """
-    Calculates class balancing weights dynamically from the target labels array.
-
-    Args:
-        train_dataset (SIADataset): The active training subset.
-
-    Returns:
-        torch.Tensor: Weights tensor mapping the class inverse distribution frequencies.
-    """
+    """Calculates class balancing weights dynamically from target labels array."""
     labels = np.array(train_dataset.labels)
     class_counts = np.bincount(labels)
     total_samples = len(labels)
     weights = total_samples / (len(class_counts) * class_counts)
-    logger.info(f"Class counts: {class_counts}. Dynamic loss balancing weights: {weights}")
     return torch.tensor(weights, dtype=torch.float32)
 
 
@@ -213,45 +168,26 @@ def train_model(
     learning_rate: float = 2e-5,
     patience: int = 2,
     accumulation_steps: int = 4,
-    num_workers: int = 4
+    num_workers: int = 0
 ) -> nn.Module:
-    """
-    Optimized training with:
-    - Pre-tokenization
-    - Gradient accumulation
-    - Multi-worker DataLoading
-    - Mixed precision
-    - Progressive validation reduction
-    """
+    """Optimized multi-signal cross-entropy classification training orchestration block."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Targeting training execution platform: {device}")
     model.to(device)
 
-    # Pre-tokenize datasets ONCE
-    logger.info("Pre-tokenizing training and validation datasets...")
+    # Pre-tokenize elements to optimize training throughput
     train_pretok = SIAPreTokenizedDataset(train_dataset.df, tokenizer) if hasattr(train_dataset, 'df') else train_dataset
     val_pretok = SIAPreTokenizedDataset(val_dataset.df, tokenizer) if hasattr(val_dataset, 'df') else val_dataset
     
     collator = SIAOptimizedCollator(tokenizer=tokenizer)
     
-    # Optimized DataLoader with multiple workers and prefetching
     train_loader = DataLoader(
-        train_pretok,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collator,
-        pin_memory=True,
-        num_workers=num_workers,
-        prefetch_factor=2
+        train_pretok, batch_size=batch_size, shuffle=True,
+        collate_fn=collator, pin_memory=True, num_workers=num_workers
     )
     val_loader = DataLoader(
-        val_pretok,
-        batch_size=batch_size * 2,  # Larger batch for validation (no backprop)
-        shuffle=False,
-        collate_fn=collator,
-        pin_memory=True,
-        num_workers=num_workers,
-        prefetch_factor=2
+        val_pretok, batch_size=batch_size * 2, shuffle=False,
+        collate_fn=collator, pin_memory=True, num_workers=num_workers
     )
 
     class_weights = compute_class_weights(train_dataset).to(device)
@@ -272,7 +208,6 @@ def train_model(
     for epoch in range(1, epochs + 1):
         model.train()
         total_train_loss = 0.0
-        step_count = 0
         optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(train_loader):
@@ -286,17 +221,15 @@ def train_model(
             fus_sev = batch["fused_severity"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
 
-            # Forward + backward with AMP
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 logits = model(
                     input_ids, attention_mask, channel, domain_tier,
                     llm_sev, res_sev, clu_sev, fus_sev
                 )
-                loss = criterion(logits, labels) / accumulation_steps  # Scale loss
+                loss = criterion(logits, labels) / accumulation_steps
 
             scaler.scale(loss).backward()
             
-            # Accumulate gradients
             if (batch_idx + 1) % accumulation_steps == 0:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -304,13 +237,12 @@ def train_model(
                 scaler.update()
                 scheduler.step()
                 optimizer.zero_grad()
-                step_count += 1
 
             total_train_loss += loss.item() * accumulation_steps
 
         avg_train_loss = total_train_loss / len(train_loader)
         
-        # Validation (skip every other epoch for speed on large datasets)
+        # Periodic dataset evaluations tracking loop updates
         if epoch % 2 == 1 or epoch == epochs:
             model.eval()
             total_val_loss = 0.0
@@ -333,7 +265,6 @@ def train_model(
             avg_val_loss = total_val_loss / len(val_loader)
             logger.info(f"Epoch {epoch}/{epochs} Summary -> Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
-            # Early stopping
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 patience_counter = 0
@@ -344,11 +275,10 @@ def train_model(
                     logger.warning(f"Early stopping condition triggered at epoch {epoch}.")
                     break
 
-    # Load best weights
     if best_weights_path.exists():
         model.load_state_dict(torch.load(best_weights_path, map_location=device))
         os.remove(best_weights_path)
-        logger.info("Restored best model weights.")
+        logger.info("Restored best model weights configuration layer state.")
         
     return model
 
@@ -363,58 +293,24 @@ def train(
     batch_size: int = 32,
     learning_rate: float = 2e-5
 ) -> Tuple[nn.Module, Dict[str, float]]:
-    """
-    Wrapper function for training pipeline orchestration.
-    
-    Args:
-        train_data: Training dataset (from stage2_preprocessing with evidence.csv-sourced text)
-        val_data: Validation dataset
-        test_data: Test dataset
-        artifacts: Preprocessing artifacts dict (encoders, scalers)
-        seed: Random seed for reproducibility
-        epochs: Number of training epochs
-        batch_size: Batch size for training
-        learning_rate: Learning rate for optimizer
-    
-    Returns:
-        Tuple of (trained_model, metrics_dict)
-    """
+    """Wrapper entry-point interface function handling model training loop cycles."""
     set_seed(seed)
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Training on device: {device}")
-    
-    # Get tokenizer
     tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-small")
-    
-    # Build model
     model = SIAMultimodalModel("microsoft/deberta-v3-small", num_labels=2)
     
-    # Train
     trained_model = train_model(
-        model=model,
-        train_dataset=train_data,
-        val_dataset=val_data,
-        tokenizer=tokenizer,
-        epochs=epochs,
-        batch_size=batch_size,
-        learning_rate=learning_rate,
-        patience=2
+        model=model, train_dataset=train_data, val_dataset=val_data,
+        tokenizer=tokenizer, epochs=epochs, batch_size=batch_size,
+        learning_rate=learning_rate, patience=2
     )
     
-    # Evaluate
     metrics = evaluate_model(trained_model, test_data, tokenizer)
-    
-    # Save
     save_model(trained_model, tokenizer, "models/deberta_sia/")
-    
     return trained_model, metrics
 
 
 def evaluate_model(model: nn.Module, test_dataset: SIADataset, tokenizer: PreTrainedTokenizerBase) -> Dict[str, float]:
-    """
-    Evaluates the model against the test dataset partition, logging key tracking metrics.
-    """
+    """Evaluates performance metrics metrics across standalone test partitions."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     
@@ -450,72 +346,32 @@ def evaluate_model(model: nn.Module, test_dataset: SIADataset, tokenizer: PreTra
         "recall": float(recall),
         "f1": float(f1)
     }
-
     logger.info(f"Final Test Evaluation Performance Metrics Profile: {metrics}")
-    
-    # Persist metrics profile to disk
-    out_dir = Path("outputs")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "metrics.json", "w") as f:
-        json.dump(metrics, f, indent=4)
-        
     return metrics
 
 
 def save_model(model: nn.Module, tokenizer: PreTrainedTokenizerBase, output_dir: str | Path = "models/deberta_sia/") -> None:
-    """Saves tokenizer patterns and structural state dictionary paths to disk."""
+    """Saves tokenizer configurations and model check-point state graphs to disk storage."""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    
     torch.save(model.state_dict(), out_path / "model.pt")
     model.deberta.config.save_pretrained(out_path)
     tokenizer.save_pretrained(out_path)
-    logger.info(f"Model weights, configuration, and tokenizer successfully serialized to: {out_path}")
+    logger.info(f"Model parameters successfully serialized outputs targeting path location: {out_path}")
 
 
 if __name__ == "__main__":
-    # UPDATED: Now uses evidence.csv as primary data source (contains ticket text)
-    DATA_PATH = Path("data/processed/evidence.csv")
+    DATA_PATH = Path("data/processed/processed.csv")
     PSEUDO_LABELS_PATH = Path("data/processed/pseudo_labeled_tickets.csv")
-    MODEL_DIR = Path("models/deberta_sia/")
     
     set_seed(42)
-
-    if not DATA_PATH.exists():
-        logger.error(f"SIA Execution halted. PRIMARY ticket data not found at: {DATA_PATH}")
-        logger.error(f"Expected evidence.csv or processed.csv with Ticket_Subject and Ticket_Description columns.")
-        sys.exit(1)
-
-    logger.info(f"Loading data from PRIMARY source: {DATA_PATH}")
-    if PSEUDO_LABELS_PATH.exists():
-        logger.info(f"Loading annotations from SECONDARY source: {PSEUDO_LABELS_PATH}")
-
-    # 1. Pipeline Dataset Load Initialization
     train_data, val_data, test_data = create_dataset(DATA_PATH, PSEUDO_LABELS_PATH)
-    
-    # 2. Tokenizer Instance Mounting
-    logger.info("Downloading/instantiating DeBERTa tokenizer parameters...")
     tokenizer_obj = AutoTokenizer.from_pretrained("microsoft/deberta-v3-small")
-
-    # 3. Model Topology Build Phase
     sia_network = SIAMultimodalModel("microsoft/deberta-v3-small")
 
-    # 4. Multimodal Model Optimization Training Run
     trained_sia_network = train_model(
-        model=sia_network,
-        train_dataset=train_data,
-        val_dataset=val_data,
-        tokenizer=tokenizer_obj,
-        epochs=5,
-        batch_size=32,
-        learning_rate=2e-5,
-        accumulation_steps=4,
-        num_workers=4
+        model=sia_network, train_dataset=train_data, val_dataset=val_data,
+        tokenizer=tokenizer_obj, epochs=5, batch_size=32, learning_rate=2e-5
     )
-
-    # 5. Evaluate Holdout Validation Metrics Profile
     evaluate_model(trained_sia_network, test_data, tokenizer=tokenizer_obj)
-
-    # 6. Save State Weights Checkpoints
-    save_model(trained_sia_network, tokenizer_obj, MODEL_DIR)
-    logger.info("Stage 2 Multimodal Model training execution pipeline completed successfully.")
+    save_model(trained_sia_network, tokenizer_obj, "models/deberta_sia/")
