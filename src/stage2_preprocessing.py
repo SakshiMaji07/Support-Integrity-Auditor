@@ -156,13 +156,20 @@ def combine_text_fields(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     logger.info("Normalizing and combining Ticket Subject and Ticket Description fields...")
-    
-    clean_sub = df["Ticket_Subject"].fillna("").apply(clean_text)
-    clean_desc = df["Ticket_Description"].fillna("").apply(clean_text)
-    
-    df["combined_text"] = clean_sub + " [SEP] " + clean_desc
-    return df
 
+    if "Ticket_Subject" in df.columns and "Ticket_Description" in df.columns:
+        clean_sub = df["Ticket_Subject"].fillna("").apply(clean_text)
+        clean_desc = df["Ticket_Description"].fillna("").apply(clean_text)
+        df["combined_text"] = clean_sub + " [SEP] " + clean_desc
+    else:
+        # Fallback: Create placeholder text from available metadata
+        logger.warning("Ticket_Subject and/or Ticket_Description columns missing. Creating synthetic text from metadata.")
+        df["combined_text"] = (
+            df.get("Ticket_ID", "").astype(str) + " " +
+            df.get("Priority_Level", "").astype(str) + " " +
+            df.get("Assigned_Severity", "").astype(str)
+        )
+    return df
 
 def encode_metadata(
     df: pd.DataFrame, 
