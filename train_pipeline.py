@@ -113,15 +113,20 @@ def run_stage1(
         raise
 
 def run_stage2(
-    dataset_path: str | Path | None = None,
+    ticket_data_path: str | Path | None = None,
+    pseudo_labels_path: str | Path | None = None,
     metrics_output_path: str | Path | None = None,
     random_seed: int = 42
 ) -> Dict[str, Any]:
     """
     Coordinates data loading, multi-signal tabular pre-formatting, and model training steps.
 
+    CRITICAL CHANGE: Now uses evidence.csv/processed.csv as primary ticket data source (with text),
+    and optionally merges pseudo-labels for annotations.
+
     Args:
-        dataset_path (str | Path | None): Path targeting Stage 1 labeled file.
+        ticket_data_path (str | Path | None): Path to evidence.csv or processed.csv (PRIMARY text source).
+        pseudo_labels_path (str | Path | None): Path to pseudo_labeled_tickets.csv (SECONDARY for labels).
         metrics_output_path (str | Path | None): Local path target for JSON checkpointing.
         random_seed (int): Reproducibility state variable passed down backend modules.
 
@@ -129,42 +134,56 @@ def run_stage2(
         Dict[str, Any]: Matrix containing evaluation scores parsed out of the training suite.
     """
     logger.info("Initializing Support Integrity Auditor (SIA) Stage 2 Framework Execution...")
+    logger.info("Data flow: PRIMARY=[evidence.csv/processed.csv with text] + SECONDARY=[pseudo_labels.csv for annotations]")
 
     # Establish localized target workspace layouts
     project_root = Path(__file__).resolve().parent
-    if dataset_path is None:
-        dataset_path = project_root / "data" / "processed" / "evidence.csv"
+    if ticket_data_path is None:
+        # PRIMARY data source: use evidence.csv or processed.csv
+        ticket_data_path = project_root / "data" / "processed" / "evidence.csv"
+    if pseudo_labels_path is None:
+        # SECONDARY data source: pseudo-labels for annotations
+        pseudo_labels_path = project_root / "data" / "processed" / "pseudo_labeled_tickets.csv"
     if metrics_output_path is None:
         metrics_output_path = project_root / "outputs" / "metrics.json"
 
-    dataset_path = Path(dataset_path)
+    ticket_data_path = Path(ticket_data_path)
+    pseudo_labels_path = Path(pseudo_labels_path)
     metrics_output_path = Path(metrics_output_path)
 
-    # Step 1: Load pseudo-labeled source data frame matrix
-    if not dataset_path.exists():
-        logger.error(f"Execution halted. Stage 1 source data array missing at: {dataset_path}")
-        raise FileNotFoundError(f"Required file input missing: {dataset_path}")
+    # Step 1: Validate primary data source exists
+    if not ticket_data_path.exists():
+        logger.error(f"Execution halted. PRIMARY ticket data missing at: {ticket_data_path}")
+        logger.error(f"Expected evidence.csv or processed.csv with Ticket_Subject and Ticket_Description columns.")
+        raise FileNotFoundError(f"Required PRIMARY ticket data missing: {ticket_data_path}")
 
-    logger.info(f"Step 1/4: Ingesting dataset files from targeted location: {dataset_path}")
-    raw_df = pd.read_csv(dataset_path)
+    logger.info(f"Step 1/4: Loading PRIMARY ticket data from: {ticket_data_path}")
+    logger.info(f"          (Optional SECONDARY labels from: {pseudo_labels_path})")
 
     # Step 2: Offload text processing, mapping, and tokenization to stage2_preprocessing
     logger.info("Step 2/4: Transferring records data matrix to feature processing framework...")
-    # train_pipeline.py line 117-120
     train_dataset, val_dataset, test_dataset, preprocessing_artifacts = prepare_stage2_data(
-        filepath=dataset_path
+        filepath=ticket_data_path,
+        pseudo_labels_filepath=pseudo_labels_path if pseudo_labels_path.exists() else None
     )
 
     # Step 3: Extract and print statistical insights about data splits and class profiles
     logger.info("Step 3/4: Compiling descriptive metrics on feature subsets...")
     
-    # Safely search across flexible variations of targets in case column names change downstream
-    target_col = "Mismatch_Label" if "Mismatch_Label" in raw_df.columns else "Mismatch_Label"
-    if target_col in raw_df.columns:
-        distribution = raw_df[target_col].value_counts().to_dict()
-        dist_str = f"Consistent (0): {distribution.get(0, 0)} | Mismatch Anomaly (1): {distribution.get(1, 0)}"
-    else:
-        dist_str = "Label tracking dimension metrics unavailable on primary dataframe."
+    # Check if datasets have mismatch labels for distribution analysis
+    try:
+        if len(train_dataset) > 0 and hasattr(train_dataset, 'df'):
+            raw_df = train_dataset.df
+            if "Mismatch_Label" in raw_df.columns:
+                distribution = raw_df["Mismatch_Label"].value_counts().to_dict()
+                dist_str = f"Consistent (0): {distribution.get(0, 0)} | Mismatch (1): {distribution.get(1, 0)}"
+            else:
+                dist_str = "Label distribution: Mismatch_Label column not found in training data."
+        else:
+            dist_str = "Label distribution: Unable to compute from datasets."
+    except Exception as e:
+        logger.warning(f"Could not compute label distribution: {e}")
+        dist_str = "Label distribution: Unable to compute."
 
     print("\n" + "="*60)
     print("       SUPPORT INTEGRITY AUDITOR DATASET METRICS STATUS")
@@ -233,6 +252,12 @@ def main() -> None:
         help="Destination target output path for tracking quality assurance execution run profiles.",
     )
     parser.add_argument(
+        "--ticket-data-path",
+        type=str,
+        default=None,
+        help="[Stage 2] Path to PRIMARY ticket data source (evidence.csv or processed.csv with text).",
+    )
+    parser.add_argument(
         "--metrics-output-path",
         type=str,
         default=None,
@@ -263,7 +288,8 @@ def main() -> None:
     )
     
     run_stage2(
-        dataset_path=args.pseudo_labels_path,
+        ticket_data_path=args.ticket_data_path,
+        pseudo_labels_path=args.pseudo_labels_path,
         metrics_output_path=args.metrics_output_path,
         random_seed=args.seed
     )
