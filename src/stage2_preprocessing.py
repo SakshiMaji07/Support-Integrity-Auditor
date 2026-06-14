@@ -6,6 +6,9 @@ and prepares it for fine-tuning a DeBERTa-v3-small model. It features text clean
 metadata label encoding, severity feature scaling, stratified splitting, and the
 instantiation of a custom PyTorch Dataset class (`SIADataset`).
 
+Now integrates evidence.csv metadata (Trigger_Keywords, Cluster_Profile, Evidence_Summary)
+to create enriched combined_text when ticket subject/description are unavailable.
+
 Artifacts are securely stored to prevent data leakage during train/eval workflows.
 """
 
@@ -57,6 +60,7 @@ class SIADataset(Dataset):
             df (pd.DataFrame): Dataframe containing fully processed text, encoded 
                                metadata, and normalized severity features.
         """
+        self.df = df
         self.texts = df["combined_text"].astype(str).tolist()
         self.channels = df["encoded_channel"].astype(int).tolist()
         self.domain_tiers = df["encoded_domain_tier"].astype(int).tolist()
@@ -87,6 +91,7 @@ class SIADataset(Dataset):
         """
         return {
             "text": self.texts[idx],
+            "combined_text": self.texts[idx],
             "channel": torch.tensor(self.channels[idx], dtype=torch.long),
             "domain_tier": torch.tensor(self.domain_tiers[idx], dtype=torch.long),
             "llm_severity": torch.tensor(self.llm_severity[idx], dtype=torch.float32),
@@ -121,6 +126,35 @@ def load_data(filepath: str | Path) -> pd.DataFrame:
     return df
 
 
+def load_evidence_data(filepath: str | Path | None = None) -> pd.DataFrame | None:
+    """
+    Optionally loads evidence.csv to supplement missing ticket text.
+
+    Args:
+        filepath (str | Path | None): Path to evidence.csv. If None, looks in data/processed/
+
+    Returns:
+        pd.DataFrame | None: Evidence dataframe or None if not found.
+    """
+    if filepath is None:
+        project_root = Path(__file__).resolve().parents[1]
+        filepath = project_root / "data" / "processed" / "evidence.csv"
+    
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"Evidence file not found at: {filepath}. Proceeding without evidence metadata.")
+        return None
+    
+    try:
+        evidence_df = pd.read_csv(filepath)
+        evidence_df.columns = [col.replace(" ", "_") for col in evidence_df.columns]
+        logger.info(f"Successfully loaded evidence data with {len(evidence_df)} entries.")
+        return evidence_df
+    except Exception as e:
+        logger.warning(f"Failed to load evidence.csv: {e}. Proceeding without evidence metadata.")
+        return None
+
+
 def clean_text(text: Any) -> str:
     """
     Cleans incoming textual data by lowercasing, stripping special characters, 
@@ -144,32 +178,65 @@ def clean_text(text: Any) -> str:
     return normalized
 
 
-def combine_text_fields(df: pd.DataFrame) -> pd.DataFrame:
+def combine_text_fields(df: pd.DataFrame, evidence_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Applies standardization and concats Subject and Description lines using a DeBERTa [SEP] token.
+    Falls back to evidence metadata if subject/description are unavailable.
 
     Args:
-        df (pd.DataFrame): Dataframe containing Subject and Description columns.
+        df (pd.DataFrame): Dataframe containing Subject and Description columns (or neither).
+        evidence_df (pd.DataFrame | None): Optional evidence dataframe with metadata columns.
 
     Returns:
         pd.DataFrame: Dataframe containing the enriched 'combined_text' column.
     """
     df = df.copy()
-    logger.info("Normalizing and combining Ticket Subject and Ticket Description fields...")
-
-    if "Ticket_Subject" in df.columns and "Ticket_Description" in df.columns:
+    logger.info("Normalizing and combining Ticket text fields...")
+    
+    # Check if subject and description columns exist
+    has_subject = "Ticket_Subject" in df.columns
+    has_description = "Ticket_Description" in df.columns
+    
+    if has_subject and has_description:
+        # Standard path: combine subject and description
+        logger.info("Found Ticket_Subject and Ticket_Description columns. Using standard text combination.")
         clean_sub = df["Ticket_Subject"].fillna("").apply(clean_text)
         clean_desc = df["Ticket_Description"].fillna("").apply(clean_text)
         df["combined_text"] = clean_sub + " [SEP] " + clean_desc
     else:
-        # Fallback: Create placeholder text from available metadata
-        logger.warning("Ticket_Subject and/or Ticket_Description columns missing. Creating synthetic text from metadata.")
-        df["combined_text"] = (
-            df.get("Ticket_ID", "").astype(str) + " " +
-            df.get("Priority_Level", "").astype(str) + " " +
-            df.get("Assigned_Severity", "").astype(str)
-        )
+        # Fallback path: use evidence metadata or synthetic text from available columns
+        logger.warning("Ticket_Subject and/or Ticket_Description columns missing. Using evidence metadata as fallback.")
+        
+        if evidence_df is not None:
+            # Merge evidence metadata using Ticket_ID
+            df = df.merge(evidence_df[["Ticket_ID", "Trigger_Keywords", "Cluster_Profile", "Evidence_Summary"]], 
+                          on="Ticket_ID", how="left")
+            
+            # Build combined text from evidence fields
+            trigger_kw = df["Trigger_Keywords"].fillna("").apply(lambda x: f"keywords:{x}" if pd.notna(x) and x != "" else "")
+            cluster_prof = df["Cluster_Profile"].fillna("").apply(lambda x: f"cluster:{x}" if pd.notna(x) and x != "" else "")
+            evidence_summ = df["Evidence_Summary"].fillna("").apply(clean_text)
+            
+            text_parts = [trigger_kw, cluster_prof, evidence_summ]
+            df["combined_text"] = (" [SEP] ".join(text_parts)).apply(lambda x: x.strip())
+            
+            logger.info("Combined text from evidence metadata (Trigger_Keywords, Cluster_Profile, Evidence_Summary).")
+        else:
+            # Fallback without evidence: use available metadata columns
+            logger.warning("Evidence data unavailable. Creating synthetic text from ticket metadata.")
+            ticket_id = df.get("Ticket_ID", "").astype(str)
+            priority = df.get("Priority_Level", "").astype(str)
+            assigned_sev = df.get("Assigned_Severity", "").astype(str)
+            
+            df["combined_text"] = (
+                "ticket " + ticket_id + " priority " + priority + " severity " + assigned_sev
+            ).apply(clean_text)
+            logger.info("Created synthetic text from Ticket_ID, Priority_Level, and Assigned_Severity.")
+    
+    # Final cleanup: ensure no empty strings
+    df["combined_text"] = df["combined_text"].fillna("").apply(lambda x: x if x.strip() else "no ticket content")
     return df
+
 
 def encode_metadata(
     df: pd.DataFrame, 
@@ -193,6 +260,14 @@ def encode_metadata(
     # Defensive fallbacks for data field variants
     channel_col = "Ticket_Channel" if "Ticket_Channel" in df.columns else "Channel"
     domain_col = "Domain_Tier" if "Domain_Tier" in df.columns else "Product_Purchased"
+    
+    # Ensure columns exist in dataframe
+    if channel_col not in df.columns:
+        logger.warning(f"Channel column '{channel_col}' not found. Creating with default 'Unknown'.")
+        df[channel_col] = "Unknown"
+    if domain_col not in df.columns:
+        logger.warning(f"Domain column '{domain_col}' not found. Creating with default 'Unknown'.")
+        df[domain_col] = "Unknown"
     
     df[channel_col] = df[channel_col].fillna("Unknown").astype(str)
     df[domain_col] = df[domain_col].fillna("Unknown").astype(str)
@@ -238,7 +313,11 @@ def scale_severity_features(
     
     # Fill arbitrary sparse NaN values defensively if present
     for col in severity_cols:
-        df[col] = df[col].fillna(0.5).astype(float)
+        if col in df.columns:
+            df[col] = df[col].fillna(0.5).astype(float)
+        else:
+            logger.warning(f"Severity column '{col}' not found. Creating with default 0.5.")
+            df[col] = 0.5
 
     if scaler is None:
         logger.info("Fitting new StandardScaler instance across severity parameter metrics.")
@@ -342,23 +421,28 @@ def create_dataset(df: pd.DataFrame) -> SIADataset:
     return SIADataset(df)
 
 
-def prepare_stage2_data(filepath: str | Path) -> Tuple[SIADataset, SIADataset, SIADataset, Dict[str, Any]]:
+def prepare_stage2_data(
+    filepath: str | Path,
+    evidence_filepath: str | Path | None = None
+) -> Tuple[SIADataset, SIADataset, SIADataset, Dict[str, Any]]:
     """
     Orchestrator pipeline executing linear tracking runs without causing data leakage.
     Fits state transformations *exclusively* on the train split, transforming validation/test afterwards.
 
     Args:
         filepath (str | Path): Input location pointing to 'pseudo_labeled_tickets.csv'.
+        evidence_filepath (str | Path | None): Optional path to 'evidence.csv' for metadata enrichment.
 
     Returns:
         Tuple[SIADataset, SIADataset, SIADataset, Dict[str, Any]]: 
             Returns (train_dataset, val_dataset, test_dataset, metadata_artifacts_dict)
     """
-    logger.info("Starting Stage 2 Production Preprocessing Pipeline Pipeline Workflow Execution.")
+    logger.info("Starting Stage 2 Production Preprocessing Pipeline Workflow Execution.")
     
     # 1. Load configuration and text fields mapping structures
     raw_df = load_data(filepath)
-    enriched_df = combine_text_fields(raw_df)
+    evidence_df = load_evidence_data(evidence_filepath)
+    enriched_df = combine_text_fields(raw_df, evidence_df)
     
     # 2. Isolate tracks instantly via stratified splits to enforce boundaries
     train_df, val_df, test_df = split_dataset(enriched_df)
@@ -395,9 +479,12 @@ def prepare_stage2_data(filepath: str | Path) -> Tuple[SIADataset, SIADataset, S
 
 if __name__ == "__main__":
     # Internal validation test run matching the defaults tree structural configurations
-    sample_path = Path("data/processed/pseudo_labeled_tickets.csv")
+    project_root = Path(__file__).resolve().parents[1]
+    sample_path = project_root / "data" / "processed" / "pseudo_labeled_tickets.csv"
+    evidence_path = project_root / "data" / "processed" / "evidence.csv"
+    
     if sample_path.exists():
-        train_ds, val_ds, test_ds, meta = prepare_stage2_data(sample_path)
+        train_ds, val_ds, test_ds, meta = prepare_stage2_data(sample_path, evidence_path)
         logger.info(f"Execution test confirmation. First sequence item shape configuration payload: {train_ds[0]}")
     else:
         logger.warning(f"Standalone pipeline test run bypassed. Target file not located at '{sample_path}'.")
