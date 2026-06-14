@@ -199,7 +199,11 @@ def train_model(
         optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps
     )
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+    if hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+    else:
+        # Fallback for older PyTorch versions where device type string isn't used
+        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     best_val_loss = float("inf")
     patience_counter = 0
     best_weights_path = Path("models/preprocessing/temp_best_weights.pt")
