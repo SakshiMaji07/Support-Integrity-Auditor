@@ -133,7 +133,7 @@ def run_stage2(
     # Establish localized target workspace layouts
     project_root = Path(__file__).resolve().parent
     if dataset_path is None:
-        dataset_path = project_root / "data" / "processed" / "pseudo_labeled_tickets.csv"
+        dataset_path = project_root / "data" / "processed" / "evidence.csv"
     if metrics_output_path is None:
         metrics_output_path = project_root / "outputs" / "metrics.json"
 
