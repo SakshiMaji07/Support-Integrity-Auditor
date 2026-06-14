@@ -456,7 +456,7 @@ def save_model(model: nn.Module, tokenizer: PreTrainedTokenizerBase, output_dir:
 
 
 if __name__ == "__main__":
-    DATA_PATH = Path("data/processed/pseudo_labeled_tickets.csv")
+    DATA_PATH = Path("data/processed/evidence.csv")
     MODEL_DIR = Path("models/deberta_sia/")
     
     set_seed(42)
