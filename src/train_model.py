@@ -25,6 +25,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     get_linear_schedule_with_warmup,
 )
+from torch.cuda.amp import GradScaler
 
 # Add parent directory to path for relative imports if executed standalone
 _parent_dir = str(Path(__file__).resolve().parent)
@@ -199,11 +200,7 @@ def train_model(
         optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps
     )
 
-    if hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
-    else:
-        # Fallback for older PyTorch versions where device type string isn't used
-        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     best_val_loss = float("inf")
     patience_counter = 0
     best_weights_path = Path("models/preprocessing/temp_best_weights.pt")
