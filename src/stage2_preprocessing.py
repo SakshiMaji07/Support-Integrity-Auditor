@@ -178,63 +178,198 @@ def clean_text(text: Any) -> str:
     return normalized
 
 
-def combine_text_fields(df: pd.DataFrame, evidence_df: pd.DataFrame | None = None) -> pd.DataFrame:
+def combine_text_fields(
+    df: pd.DataFrame,
+    evidence_df: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """
-    Applies standardization and concats Subject and Description lines using a DeBERTa [SEP] token.
-    Falls back to evidence metadata if subject/description are unavailable.
-
-    Args:
-        df (pd.DataFrame): Dataframe containing Subject and Description columns (or neither).
-        evidence_df (pd.DataFrame | None): Optional evidence dataframe with metadata columns.
-
-    Returns:
-        pd.DataFrame: Dataframe containing the enriched 'combined_text' column.
+    Applies standardization and combines ticket text fields.
+    Falls back to evidence metadata if Ticket_Subject and
+    Ticket_Description are unavailable.
     """
+
     df = df.copy()
-    logger.info("Normalizing and combining Ticket text fields...")
-    
-    # Check if subject and description columns exist
+    logger.info("Normalizing and combining ticket text fields...")
+
+    # --------------------------------------------------
+    # Standard path: Subject + Description
+    # --------------------------------------------------
     has_subject = "Ticket_Subject" in df.columns
     has_description = "Ticket_Description" in df.columns
-    
+
     if has_subject and has_description:
-        # Standard path: combine subject and description
-        logger.info("Found Ticket_Subject and Ticket_Description columns. Using standard text combination.")
+
+        logger.info(
+            "Found Ticket_Subject and Ticket_Description columns. "
+            "Using standard text combination."
+        )
+
         clean_sub = df["Ticket_Subject"].fillna("").apply(clean_text)
         clean_desc = df["Ticket_Description"].fillna("").apply(clean_text)
-        df["combined_text"] = clean_sub + " [SEP] " + clean_desc
+
+        df["combined_text"] = (
+            clean_sub.astype(str)
+            + " [SEP] "
+            + clean_desc.astype(str)
+        )
+
+    # --------------------------------------------------
+    # Fallback path: Evidence metadata
+    # --------------------------------------------------
     else:
-        # Fallback path: use evidence metadata or synthetic text from available columns
-        logger.warning("Ticket_Subject and/or Ticket_Description columns missing. Using evidence metadata as fallback.")
-        
+
+        logger.warning(
+            "Ticket_Subject and/or Ticket_Description columns missing. "
+            "Attempting evidence metadata fallback."
+        )
+
         if evidence_df is not None:
-            # Merge evidence metadata using Ticket_ID
-            df = df.merge(evidence_df[["Ticket_ID", "Trigger_Keywords", "Cluster_Profile", "Evidence_Summary"]], 
-                          on="Ticket_ID", how="left")
-            
-            # Build combined text from evidence fields
-            trigger_kw = df["Trigger_Keywords"].fillna("").apply(lambda x: f"keywords:{x}" if pd.notna(x) and x != "" else "")
-            cluster_prof = df["Cluster_Profile"].fillna("").apply(lambda x: f"cluster:{x}" if pd.notna(x) and x != "" else "")
-            evidence_summ = df["Evidence_Summary"].fillna("").apply(clean_text)
-            
-            text_parts = [trigger_kw, cluster_prof, evidence_summ]
-            df["combined_text"] = (" [SEP] ".join(text_parts)).apply(lambda x: x.strip())
-            
-            logger.info("Combined text from evidence metadata (Trigger_Keywords, Cluster_Profile, Evidence_Summary).")
-        else:
-            # Fallback without evidence: use available metadata columns
-            logger.warning("Evidence data unavailable. Creating synthetic text from ticket metadata.")
-            ticket_id = df.get("Ticket_ID", "").astype(str)
-            priority = df.get("Priority_Level", "").astype(str)
-            assigned_sev = df.get("Assigned_Severity", "").astype(str)
-            
+
+            required_cols = [
+                "Ticket_ID",
+                "Trigger_Keywords",
+                "Cluster_Profile",
+                "Evidence_Summary"
+            ]
+
+            missing_cols = [
+                col for col in required_cols
+                if col not in evidence_df.columns
+            ]
+
+            if missing_cols:
+
+                logger.warning(
+                    f"Evidence dataframe missing columns: {missing_cols}. "
+                    "Falling back to synthetic text generation."
+                )
+
+            else:
+
+                logger.info(
+                    "Merging evidence metadata using Ticket_ID."
+                )
+
+                original_rows = len(df)
+
+                df = df.merge(
+                    evidence_df[required_cols],
+                    on="Ticket_ID",
+                    how="left"
+                )
+
+                logger.info(
+                    f"Evidence merge complete. "
+                    f"Rows before merge: {original_rows}, "
+                    f"rows after merge: {len(df)}"
+                )
+
+                trigger_kw = (
+                    df["Trigger_Keywords"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(
+                        lambda x: f"keywords:{x}"
+                        if x.strip()
+                        else ""
+                    )
+                )
+
+                cluster_prof = (
+                    df["Cluster_Profile"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(
+                        lambda x: f"cluster:{x}"
+                        if x.strip()
+                        else ""
+                    )
+                )
+
+                evidence_summ = (
+                    df["Evidence_Summary"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(clean_text)
+                )
+
+                # FIXED: element-wise concatenation
+                df["combined_text"] = (
+                    trigger_kw
+                    + " [SEP] "
+                    + cluster_prof
+                    + " [SEP] "
+                    + evidence_summ
+                ).str.strip()
+
+                logger.info(
+                    "Successfully created combined_text "
+                    "from evidence metadata."
+                )
+
+        # --------------------------------------------------
+        # Final fallback: synthetic text
+        # --------------------------------------------------
+        if "combined_text" not in df.columns:
+
+            logger.warning(
+                "Evidence metadata unavailable or invalid. "
+                "Creating synthetic ticket text."
+            )
+
+            ticket_id = (
+                df["Ticket_ID"].astype(str)
+                if "Ticket_ID" in df.columns
+                else ""
+            )
+
+            priority = (
+                df["Priority_Level"].astype(str)
+                if "Priority_Level" in df.columns
+                else ""
+            )
+
+            assigned_sev = (
+                df["Assigned_Severity"].astype(str)
+                if "Assigned_Severity" in df.columns
+                else ""
+            )
+
             df["combined_text"] = (
-                "ticket " + ticket_id + " priority " + priority + " severity " + assigned_sev
+                "ticket "
+                + ticket_id
+                + " priority "
+                + priority
+                + " severity "
+                + assigned_sev
             ).apply(clean_text)
-            logger.info("Created synthetic text from Ticket_ID, Priority_Level, and Assigned_Severity.")
-    
-    # Final cleanup: ensure no empty strings
-    df["combined_text"] = df["combined_text"].fillna("").apply(lambda x: x if x.strip() else "no ticket content")
+
+            logger.info(
+                "Synthetic text successfully generated."
+            )
+
+    # --------------------------------------------------
+    # Final cleanup
+    # --------------------------------------------------
+    df["combined_text"] = (
+        df["combined_text"]
+        .fillna("")
+        .astype(str)
+        .apply(
+            lambda x: x.strip()
+            if x.strip()
+            else "no ticket content"
+        )
+    )
+
+    empty_count = (df["combined_text"] == "no ticket content").sum()
+
+    logger.info(
+        f"Text combination complete. "
+        f"Total records: {len(df)}, "
+        f"Empty records replaced: {empty_count}"
+    )
+
     return df
 
 
