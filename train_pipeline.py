@@ -7,20 +7,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from typing import Any, Dict
-
 import sys
-from pathlib import Path
 
-# Ensure src is in path
+# Ensure project root/src is in path if necessary
 SRC_PATH = Path(__file__).resolve().parent / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
     
-# Import stage 1 processing and labeling routines without duplicating logic
+# Import modular processing, labeling, and training functions
 from src.stage1_preprocessing import load_data, preprocess_dataframe, save_processed_data
 from src.pseudo_labels import generate_pseudo_labels
-from src.stage2_preprocessing import prepare_stage2_data
-from src.train_model import train
+# MODIFICATION: Import from local or src depending on structural layout
+from stage2_preprocessing import prepare_stage2_data
+from train_model import train
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,6 @@ def run_stage1(
     """Orchestrates Stage 1 of the pipeline: preprocessing, pseudo-labeling, and metrics tracking."""
     logger.info("Starting Pipeline Stage 1: Preprocessing & Pseudo-Label Generation")
 
-    # Set default paths if none provided
     project_root = Path(__file__).resolve().parent
     if processed_data_path is None:
         processed_data_path = project_root / "data" / "processed" / "processed.csv"
@@ -65,15 +63,12 @@ def run_stage1(
         ticket_count = len(df_pseudo)
         mismatch_rate = float(df_pseudo["Mismatch_Label"].mean())
 
-        # Extract and format the mismatch distribution (counts of 0s and 1s)
         mismatch_counts = df_pseudo["Mismatch_Label"].value_counts().to_dict()
         mismatch_distribution = {str(k): int(v) for k, v in mismatch_counts.items()}
 
-        # Extract and format the inferred severity distribution
         severity_counts = df_pseudo["Inferred_Severity"].value_counts().to_dict()
         inferred_severity_distribution = {str(k): int(v) for k, v in severity_counts.items()}
 
-        # Map continuous signals to discrete severity buckets using the pipeline's cutoff thresholds
         def _score_to_bucket(series: pd.Series) -> np.ndarray:
             return np.where(series <= 0.3, 1,
                    np.where(series <= 0.55, 2,
@@ -83,7 +78,6 @@ def run_stage1(
         res_buckets = _score_to_bucket(df_pseudo["Resolution_Severity"])
         cluster_buckets = _score_to_bucket(df_pseudo["Cluster_Severity"])
 
-        # Compute signal agreement metrics (matching buckets / total records)
         llm_vs_resolution = float(np.mean(llm_buckets == res_buckets))
         llm_vs_cluster = float(np.mean(llm_buckets == cluster_buckets))
         resolution_vs_cluster = float(np.mean(res_buckets == cluster_buckets))
@@ -100,7 +94,6 @@ def run_stage1(
             },
         }
 
-        # Write execution summary out to file
         summary_output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(summary_output_path, "w", encoding="utf-8") as f:
             json.dump(summary_data, f, indent=4)
@@ -118,31 +111,14 @@ def run_stage2(
     metrics_output_path: str | Path | None = None,
     random_seed: int = 42
 ) -> Dict[str, Any]:
-    """
-    Coordinates data loading, multi-signal tabular pre-formatting, and model training steps.
-
-    CRITICAL CHANGE: Now uses evidence.csv/processed.csv as primary ticket data source (with text),
-    and optionally merges pseudo-labels for annotations.
-
-    Args:
-        ticket_data_path (str | Path | None): Path to evidence.csv or processed.csv (PRIMARY text source).
-        pseudo_labels_path (str | Path | None): Path to pseudo_labeled_tickets.csv (SECONDARY for labels).
-        metrics_output_path (str | Path | None): Local path target for JSON checkpointing.
-        random_seed (int): Reproducibility state variable passed down backend modules.
-
-    Returns:
-        Dict[str, Any]: Matrix containing evaluation scores parsed out of the training suite.
-    """
+    """Coordinates data loading, multi-signal tabular pre-formatting, and model training steps."""
     logger.info("Initializing Support Integrity Auditor (SIA) Stage 2 Framework Execution...")
-    logger.info("Data flow: PRIMARY=[evidence.csv/processed.csv with text] + SECONDARY=[pseudo_labels.csv for annotations]")
-
-    # Establish localized target workspace layouts
+    
     project_root = Path(__file__).resolve().parent
+    # MODIFICATION: Standardized defaults to look for primary processed.csv containing text features
     if ticket_data_path is None:
-        # PRIMARY data source: use evidence.csv or processed.csv
-        ticket_data_path = project_root / "data" / "processed" / "evidence.csv"
+        ticket_data_path = project_root / "data" / "processed" / "processed.csv"
     if pseudo_labels_path is None:
-        # SECONDARY data source: pseudo-labels for annotations
         pseudo_labels_path = project_root / "data" / "processed" / "pseudo_labeled_tickets.csv"
     if metrics_output_path is None:
         metrics_output_path = project_root / "outputs" / "metrics.json"
@@ -151,26 +127,23 @@ def run_stage2(
     pseudo_labels_path = Path(pseudo_labels_path)
     metrics_output_path = Path(metrics_output_path)
 
-    # Step 1: Validate primary data source exists
     if not ticket_data_path.exists():
         logger.error(f"Execution halted. PRIMARY ticket data missing at: {ticket_data_path}")
-        logger.error(f"Expected evidence.csv or processed.csv with Ticket_Subject and Ticket_Description columns.")
         raise FileNotFoundError(f"Required PRIMARY ticket data missing: {ticket_data_path}")
 
     logger.info(f"Step 1/4: Loading PRIMARY ticket data from: {ticket_data_path}")
-    logger.info(f"          (Optional SECONDARY labels from: {pseudo_labels_path})")
+    logger.info(f"          (SECONDARY labels from: {pseudo_labels_path})")
 
-    # Step 2: Offload text processing, mapping, and tokenization to stage2_preprocessing
+    # Step 2: Offload text processing and dataset matrix splitting
     logger.info("Step 2/4: Transferring records data matrix to feature processing framework...")
+    # MODIFICATION: Clean decoupled path loading orchestration passed down to the staging framework
     train_dataset, val_dataset, test_dataset, preprocessing_artifacts = prepare_stage2_data(
         filepath=ticket_data_path,
         pseudo_labels_filepath=pseudo_labels_path if pseudo_labels_path.exists() else None
     )
 
-    # Step 3: Extract and print statistical insights about data splits and class profiles
+    # Step 3: Extract and print statistical insights about data splits
     logger.info("Step 3/4: Compiling descriptive metrics on feature subsets...")
-    
-    # Check if datasets have mismatch labels for distribution analysis
     try:
         if len(train_dataset) > 0 and hasattr(train_dataset, 'df'):
             raw_df = train_dataset.df
@@ -194,7 +167,7 @@ def run_stage2(
     print(f" Global Baseline Class Distribution   : {dist_str}")
     print("="*60 + "\n")
 
-    # Step 4: Transfer finalized datasets to train_model suite for model tuning
+    # Step 4: Pass structural dataset configurations to the specialized trainer execution pipeline
     logger.info("Step 4/4: Passing PyTorch dataset references to the DeBERTa training routine...")
     trained_model, performance_metrics = train(
         train_data=train_dataset,
@@ -204,14 +177,12 @@ def run_stage2(
         seed=random_seed
     )
 
-    # Save metrics block to structured JSON format
     metrics_output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metrics_output_path, "w", encoding="utf-8") as metrics_file:
         json.dump(performance_metrics, metrics_file, indent=4, ensure_ascii=False)
     
     logger.info(f"Evaluation metrics snapshot successfully exported to file: {metrics_output_path}")
 
-    # Display final execution summary in formatted view layout
     print("\n" + "="*60)
     print("          STAGE 2 DEBERTA MODEL VALIDATION METRICS")
     print("="*60)
@@ -219,7 +190,6 @@ def run_stage2(
         print(f" • {key.title().ljust(15)} : {float(score) * 100:.2f}%")
     print("="*60 + "\n")
 
-    logger.info("SIA Orchestration Layer pipeline run executed cleanly without runtime exceptions.")
     return performance_metrics
 
 def main() -> None:
@@ -255,7 +225,7 @@ def main() -> None:
         "--ticket-data-path",
         type=str,
         default=None,
-        help="[Stage 2] Path to PRIMARY ticket data source (evidence.csv or processed.csv with text).",
+        help="[Stage 2] Path to PRIMARY ticket data source (processed.csv with text columns).",
     )
     parser.add_argument(
         "--metrics-output-path",
@@ -267,17 +237,15 @@ def main() -> None:
         "--seed",
         type=int,
         default=42,
-        help="Main random seed value selection to guarantee reproducibility across underlying runtime engines.",
+        help="Main random seed value selection to guarantee reproducibility.",
     )
     args = parser.parse_args()
 
-    # Configure operational logger layout properties cleanly
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Set underlying numpy seeds to ensure deterministic execution steps inside modules
     np.random.seed(args.seed)
 
     run_stage1(
@@ -293,3 +261,6 @@ def main() -> None:
         metrics_output_path=args.metrics_output_path,
         random_seed=args.seed
     )
+
+if __name__ == "__main__":
+    main()
