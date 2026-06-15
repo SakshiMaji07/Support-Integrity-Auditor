@@ -4,24 +4,29 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any, Dict
+
 import numpy as np
 import pandas as pd
-from typing import Any, Dict
 import sys
 
-# Ensure project root/src is in path if necessary
+# Ensure project root/src is in path
 SRC_PATH = Path(__file__).resolve().parent / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
-    
+
 # Import modular processing, labeling, and training functions
-from src.stage1_preprocessing import load_data, preprocess_dataframe, save_processed_data
-from src.pseudo_labels import generate_pseudo_labels
-# MODIFICATION: Import from local or src depending on structural layout
+from stage1_preprocessing import (
+    load_data,
+    preprocess_dataframe,
+    save_processed_data,
+)
+from pseudo_labels import generate_pseudo_labels
 from stage2_preprocessing import prepare_stage2_data
 from train_model import train
 
 logger = logging.getLogger(__name__)
+
 
 def run_stage1(
     raw_data_path: str | Path | None = None,
@@ -54,8 +59,7 @@ def run_stage1(
         # 2. Generate Pseudo-labels
         logger.info("Step 2/3: Generating self-supervised pseudo-labels...")
         df_pseudo = generate_pseudo_labels(
-            input_path=processed_data_path, 
-            output_path=pseudo_labels_path
+            input_path=processed_data_path, output_path=pseudo_labels_path
         )
 
         # 3. Compute Stage 1 Statistics & Metrics
@@ -70,9 +74,15 @@ def run_stage1(
         inferred_severity_distribution = {str(k): int(v) for k, v in severity_counts.items()}
 
         def _score_to_bucket(series: pd.Series) -> np.ndarray:
-            return np.where(series <= 0.3, 1,
-                   np.where(series <= 0.55, 2,
-                   np.where(series <= 0.75, 3, 4)))
+            return np.where(
+                series <= 0.3,
+                1,
+                np.where(
+                    series <= 0.55,
+                    2,
+                    np.where(series <= 0.75, 3, 4),
+                ),
+            )
 
         llm_buckets = _score_to_bucket(df_pseudo["LLM_Severity"])
         res_buckets = _score_to_bucket(df_pseudo["Resolution_Severity"])
@@ -98,24 +108,28 @@ def run_stage1(
         with open(summary_output_path, "w", encoding="utf-8") as f:
             json.dump(summary_data, f, indent=4)
 
-        logger.info("Stage 1 execution summary successfully generated at %s", summary_output_path)
+        logger.info(
+            "Stage 1 execution summary successfully generated at %s", summary_output_path
+        )
         logger.info("Stage 1 execution completed successfully.")
 
     except Exception as error:
         logger.exception("Pipeline processing failure during Stage 1: %s", error)
         raise
 
+
 def run_stage2(
     ticket_data_path: str | Path | None = None,
     pseudo_labels_path: str | Path | None = None,
     metrics_output_path: str | Path | None = None,
-    random_seed: int = 42
+    random_seed: int = 42,
 ) -> Dict[str, Any]:
     """Coordinates data loading, multi-signal tabular pre-formatting, and model training steps."""
-    logger.info("Initializing Support Integrity Auditor (SIA) Stage 2 Framework Execution...")
-    
+    logger.info(
+        "Initializing Support Integrity Auditor (SIA) Stage 2 Framework Execution..."
+    )
+
     project_root = Path(__file__).resolve().parent
-    # MODIFICATION: Standardized defaults to look for primary processed.csv containing text features
     if ticket_data_path is None:
         ticket_data_path = project_root / "data" / "processed" / "processed.csv"
     if pseudo_labels_path is None:
@@ -136,16 +150,17 @@ def run_stage2(
 
     # Step 2: Offload text processing and dataset matrix splitting
     logger.info("Step 2/4: Transferring records data matrix to feature processing framework...")
-    # MODIFICATION: Clean decoupled path loading orchestration passed down to the staging framework
     train_dataset, val_dataset, test_dataset, preprocessing_artifacts = prepare_stage2_data(
         filepath=ticket_data_path,
-        pseudo_labels_filepath=pseudo_labels_path if pseudo_labels_path.exists() else None
+        pseudo_labels_filepath=pseudo_labels_path
+        if pseudo_labels_path.exists()
+        else None,
     )
 
     # Step 3: Extract and print statistical insights about data splits
     logger.info("Step 3/4: Compiling descriptive metrics on feature subsets...")
     try:
-        if len(train_dataset) > 0 and hasattr(train_dataset, 'df'):
+        if len(train_dataset) > 0 and hasattr(train_dataset, "df"):
             raw_df = train_dataset.df
             if "Mismatch_Label" in raw_df.columns:
                 distribution = raw_df["Mismatch_Label"].value_counts().to_dict()
@@ -158,14 +173,14 @@ def run_stage2(
         logger.warning(f"Could not compute label distribution: {e}")
         dist_str = "Label distribution: Unable to compute."
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("       SUPPORT INTEGRITY AUDITOR DATASET METRICS STATUS")
-    print("="*60)
+    print("=" * 60)
     print(f" Training Sample Subsets Block Matrix : {len(train_dataset):,}")
     print(f" Validation Optimization Line Space   : {len(val_dataset):,}")
     print(f" Test Evaluation Boundary Array Size : {len(test_dataset):,}")
     print(f" Global Baseline Class Distribution   : {dist_str}")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     # Step 4: Pass structural dataset configurations to the specialized trainer execution pipeline
     logger.info("Step 4/4: Passing PyTorch dataset references to the DeBERTa training routine...")
@@ -174,23 +189,28 @@ def run_stage2(
         val_data=val_dataset,
         test_data=test_dataset,
         artifacts=preprocessing_artifacts,
-        seed=random_seed
+        seed=random_seed,
     )
 
     metrics_output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metrics_output_path, "w", encoding="utf-8") as metrics_file:
         json.dump(performance_metrics, metrics_file, indent=4, ensure_ascii=False)
-    
+
     logger.info(f"Evaluation metrics snapshot successfully exported to file: {metrics_output_path}")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("          STAGE 2 DEBERTA MODEL VALIDATION METRICS")
-    print("="*60)
+    print("=" * 60)
     for key, score in performance_metrics.items():
-        print(f" • {key.title().ljust(15)} : {float(score) * 100:.2f}%")
-    print("="*60 + "\n")
+        if key not in [
+            "confusion_matrix",
+            "classification_report",
+        ]:  # Skip complex structures
+            print(f" • {key.title().ljust(25)} : {float(score) * 100:.2f}%")
+    print("=" * 60 + "\n")
 
     return performance_metrics
+
 
 def main() -> None:
     """Main entry point configuration parsing execution options."""
@@ -254,13 +274,14 @@ def main() -> None:
         pseudo_labels_path=args.pseudo_labels_path,
         summary_output_path=args.summary_output_path,
     )
-    
+
     run_stage2(
         ticket_data_path=args.ticket_data_path,
         pseudo_labels_path=args.pseudo_labels_path,
         metrics_output_path=args.metrics_output_path,
-        random_seed=args.seed
+        random_seed=args.seed,
     )
+
 
 if __name__ == "__main__":
     main()
