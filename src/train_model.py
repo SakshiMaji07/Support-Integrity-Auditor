@@ -87,7 +87,9 @@ class SIAOptimizedCollator:
             "resolution_severity": torch.stack(
                 [item["resolution_severity"] for item in batch]
             ),
-            "cluster_severity": torch.stack([item["cluster_severity"] for item in batch]),
+            "cluster_severity": torch.stack(
+                [item["cluster_severity"] for item in batch]
+            ),
             "fused_severity": torch.stack([item["fused_severity"] for item in batch]),
             "label": torch.stack([item["label"] for item in batch]),
         }
@@ -304,7 +306,9 @@ def train_model(
                             batch["cluster_severity"].to(device, non_blocking=True),
                             batch["fused_severity"].to(device, non_blocking=True),
                         )
-                        v_loss = criterion(logits, batch["label"].to(device, non_blocking=True))
+                        v_loss = criterion(
+                            logits, batch["label"].to(device, non_blocking=True)
+                        )
                     total_val_loss += v_loss.item()
 
             avg_val_loss = total_val_loss / len(val_loader)
@@ -339,7 +343,7 @@ def train(
     epochs: int = 5,
     batch_size: int = 32,
     learning_rate: float = 2e-5,
-) -> Tuple[nn.Module, Dict[str, float]]:
+) -> Tuple[nn.Module, Dict[str, Any]]:
     """Wrapper entry-point interface function handling model training loop cycles."""
     set_seed(seed)
     tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-small")
@@ -363,7 +367,7 @@ def train(
 
 def evaluate_model(
     model: nn.Module, test_dataset: SIADataset, tokenizer: PreTrainedTokenizerBase
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Comprehensive evaluation with all required metrics."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
@@ -412,7 +416,9 @@ def evaluate_model(
 
     # Per-class metrics
     precision_per_class, recall_per_class, f1_per_class, _ = (
-        precision_recall_fscore_support(all_labels, all_preds, average=None, zero_division=0)
+        precision_recall_fscore_support(
+            all_labels, all_preds, average=None, zero_division=0
+        )
     )
 
     # Confusion matrix
@@ -420,7 +426,10 @@ def evaluate_model(
 
     # Classification report
     class_report = classification_report(
-        all_labels, all_preds, target_names=["Consistent", "Mismatch"], output_dict=True
+        all_labels,
+        all_preds,
+        target_names=["Consistent", "Mismatch"],
+        output_dict=True,
     )
 
     metrics = {
@@ -456,7 +465,9 @@ def evaluate_model(
     print(f"    - Recall:    {recall_per_class[1]:.4f}")
     print(f"    - F1 Score:  {f1_per_class[1]:.4f}")
     print(f"\nConfusion Matrix:\n{conf_matrix}")
-    print(f"\nClassification Report:\n{classification_report(all_labels, all_preds, target_names=['Consistent', 'Mismatch'])}")
+    print(
+        f"\nClassification Report:\n{classification_report(all_labels, all_preds, target_names=['Consistent', 'Mismatch'])}"
+    )
     print("=" * 70 + "\n")
 
     return metrics
