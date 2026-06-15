@@ -222,8 +222,14 @@ def prepare_stage2_data(
                     df_primary[col] = df_labels[col]
 
     # Ensure required columns exist
-    required_cols = ["Ticket_Channel", "Domain_Tier", "LLM_Severity",
-                     "Resolution_Severity", "Cluster_Severity", "Inferred_Severity"]
+    required_cols = [
+        "Ticket_Channel",
+        "Domain_Tier",
+        "LLM_Severity",
+        "Resolution_Severity",
+        "Cluster_Severity",
+        "Inferred_Severity",
+    ]
     for col in required_cols:
         if col not in df_primary.columns:
             if "Severity" in col:
@@ -245,9 +251,12 @@ def prepare_stage2_data(
         df_primary, channel_encoder, domain_encoder, severity_scaler
     )
 
-    # Train/Val/Test split
+    # Train/Val/Test split with stratification
     train_df, test_df = train_test_split(
-        df_primary, test_size=0.2, random_state=42, stratify=df_primary["Mismatch_Label"]
+        df_primary,
+        test_size=0.2,
+        random_state=42,
+        stratify=df_primary["Mismatch_Label"],
     )
     train_df, val_df = train_test_split(
         train_df, test_size=0.1, random_state=42, stratify=train_df["Mismatch_Label"]
